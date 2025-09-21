@@ -5,6 +5,7 @@ import secrets
 from functools import wraps
 from urllib.parse import quote
 from datetime import datetime
+import tempfile
 
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(32)
@@ -30,13 +31,16 @@ def get_unique_filename(directory, original_name):
             return unique_name
         counter += 1
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DOWNLOAD_FOLDER = os.path.join(BASE_DIR, 'configs')
+# استخدام مسار مؤقت متوافق مع Render
+DOWNLOAD_FOLDER = os.path.join(tempfile.gettempdir(), 'configs')
 CONFIG_TYPES = ['HTTP_CUSTOM', 'Dark_Tunnel', 'HTTP_INJECTOR', 'تطبيقات معدلة🔥+حسابات مدفوعة']
 ADMIN_CREDENTIALS = {'username': 'admin', 'password': 'admink123'}
 
+# تأكد من إنشاء المجلدات عند بدء التشغيل
 for config_type in CONFIG_TYPES:
     os.makedirs(os.path.join(DOWNLOAD_FOLDER, config_type), exist_ok=True)
+
+# ... (باقي الكود بدون تغيير حتى نهاية الملف) ...
 
 def admin_required(f):
     @wraps(f)
@@ -1385,5 +1389,8 @@ def download(config_type, filename):
     response.headers['Content-Disposition'] = f"attachment; {file_expr}"
     return response
 
+
+# التعديل النهائي في سطر التشغيل
 if __name__ == '__main__':
-    app.run(debug=False)
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port, debug=False)
