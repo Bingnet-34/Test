@@ -1,14 +1,35 @@
 import os
-from flask import Flask, render_template_string, send_from_directory, request, redirect, url_for, session, flash, make_response
-from werkzeug.utils import secure_filename, safe_join
 import secrets
-from functools import wraps
-from urllib.parse import quote
+import sqlite3
+import json
+import hashlib
+import hmac
 from datetime import datetime
-import tempfile
+from functools import wraps
+from threading import Thread
+from urllib.parse import quote, parse_qs, unquote_plus
+
+from flask import Flask, render_template_string, send_from_directory, request, redirect, url_for, session, flash
+from werkzeug.utils import secure_filename, safe_join
+import telebot
+from telebot.types import WebAppInfo, InlineKeyboardMarkup, InlineKeyboardButton, UserProfilePhotos
 
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(32)
+
+# إعدادات البوت التليجرام
+TELEGRAM_BOT_TOKEN = os.environ.get('', '8470884276:AAFoegIUdxQVlKYE9sJXMJ-XVNsaLQv2tGE')
+bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
+
+# إعدادات المجلدات
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DOWNLOAD_FOLDER = os.path.join(BASE_DIR, 'configs')
+CONFIG_TYPES = ['HTTP_CUSTOM', 'Dark_Tunnel', 'HTTP_INJECTOR', 'تطبيقات معدلة🔥+حسابات مدفوعة']
+ADMIN_CREDENTIALS = {'username': 'admin', 'password': 'admink123'}
+
+# إنشاء مجلدات التكوينات
+for config_type in CONFIG_TYPES:
+    os.makedirs(os.path.join(DOWNLOAD_FOLDER, config_type), exist_ok=True)
 
 # دالة لتحويل حجم الملف إلى صيغة قابلة للقراءة
 def human_readable_size(size):
@@ -31,16 +52,85 @@ def get_unique_filename(directory, original_name):
             return unique_name
         counter += 1
 
-# استخدام مسار مؤقت متوافق مع Render
-DOWNLOAD_FOLDER = os.path.join(tempfile.gettempdir(), 'configs')
-CONFIG_TYPES = ['HTTP_CUSTOM', 'Dark_Tunnel', 'HTTP_INJECTOR', 'تطبيقات معدلة🔥+حسابات مدفوعة']
-ADMIN_CREDENTIALS = {'username': 'admin', 'password': 'admink123'}
+# دالة للتحقق من بيانات Telegram WebApp
+def verify_telegram_data(data):
+    try:
+        received_hash = data.pop('hash')
+        data_check_string = "\n".join([f"{k}={v}" for k, v in sorted(data.items())])
+        secret_key = hmac.new(b"WebAppData", TELEGRAM_BOT_TOKEN.encode(), hashlib.sha256).digest()
+        calculated_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
+        return calculated_hash == received_hash
+    except Exception as e:
+        print(f"Error verifying Telegram data: {e}")
+        return False
 
-# تأكد من إنشاء المجلدات عند بدء التشغيل
-for config_type in CONFIG_TYPES:
-    os.makedirs(os.path.join(DOWNLOAD_FOLDER, config_type), exist_ok=True)
+# إنشاء قاعدة بيانات للمستخدمين
+def init_db():
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS users
+                 (id INTEGER PRIMARY KEY, 
+                 telegram_id INTEGER UNIQUE, 
+                 first_name TEXT, 
+                 last_name TEXT, 
+                 username TEXT, 
+                 photo_url TEXT,
+                 last_download TEXT,
+                 download_count INTEGER DEFAULT 0)''')
+    conn.commit()
+    conn.close()
 
-# ... (باقي الكود بدون تغيير حتى نهاية الملف) ...
+init_db()
+
+# الحصول على معلومات المستخدم من قاعدة البيانات
+def get_user_info(telegram_id):
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    c.execute("SELECT * FROM users WHERE telegram_id=?", (telegram_id,))
+    user = c.fetchone()
+    conn.close()
+    return user
+
+# حفظ معلومات المستخدم في قاعدة البيانات
+def save_user_info(user_data):
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    
+    # تحقق مما إذا كان المستخدم موجودًا بالفعل
+    c.execute("SELECT * FROM users WHERE telegram_id=?", (user_data['id'],))
+    existing_user = c.fetchone()
+    
+    if existing_user:
+        # تحديث معلومات المستخدم
+        c.execute('''UPDATE users SET 
+                     first_name=?, last_name=?, username=?, photo_url=?
+                     WHERE telegram_id=?''',
+                 (user_data['first_name'], user_data['last_name'], 
+                  user_data['username'], user_data['photo_url'], 
+                  user_data['id']))
+    else:
+        # إضافة مستخدم جديد
+        c.execute('''INSERT INTO users 
+                     (telegram_id, first_name, last_name, username, photo_url, download_count) 
+                     VALUES (?, ?, ?, ?, ?, ?)''',
+                 (user_data['id'], user_data['first_name'], 
+                  user_data['last_name'], user_data['username'], 
+                  user_data['photo_url'], 0))
+    
+    conn.commit()
+    conn.close()
+
+# تحديث إحصائيات التنزيل للمستخدم
+def update_user_download(telegram_id, filename):
+    conn = sqlite3.connect('users.db')
+    c = conn.cursor()
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    c.execute('''UPDATE users SET 
+                 last_download=?, download_count=download_count+1 
+                 WHERE telegram_id=?''',
+              (now, telegram_id))
+    conn.commit()
+    conn.close()
 
 def admin_required(f):
     @wraps(f)
@@ -80,16 +170,91 @@ template_protection_script = """
 
 @app.route('/')
 def index():
+    # استخراج بيانات المستخدم من Telegram WebApp
+    user_info = None
+    init_data = request.args.get('tgWebAppData')
+    
+    if init_data:
+        try:
+            # تحليل بيانات التليجرام بشكل صحيح
+            parsed_data = parse_qs(unquote(init_data))
+            
+            # تحويل البيانات إلى قاموس مسطح
+            data_dict = {}
+            for key, values in parsed_data.items():
+                if values:
+                    data_dict[key] = values[0]
+            
+            # التحقق من صحة البيانات
+            if verify_telegram_data(data_dict):
+                # استخراج بيانات المستخدم من حقل user
+                user_str = data_dict.get('user', '{}')
+                user_data = json.loads(user_str)
+                
+                # تخزين معلومات المستخدم في الجلسة
+                session['telegram_id'] = user_data['id']
+                session['first_name'] = user_data.get('first_name', '')
+                session['last_name'] = user_data.get('last_name', '')
+                session['username'] = user_data.get('username', '')
+                session['photo_url'] = f"https://api.dicebear.com/7.x/bottts/svg?seed={user_data['id']}"
+                
+                # الحصول على معلومات التنزيل من قاعدة البيانات
+                user_db_info = get_user_info(user_data['id'])
+                
+                if user_db_info:
+                    last_download = user_db_info[6] if user_db_info[6] else 'لم يقم بتنزيل'
+                    download_count = user_db_info[7] if user_db_info[7] else 0
+                else:
+                    # حفظ معلومات المستخدم في قاعدة البيانات إذا لم يكن موجوداً
+                    save_user_info({
+                        'id': user_data['id'],
+                        'first_name': user_data.get('first_name', ''),
+                        'last_name': user_data.get('last_name', ''),
+                        'username': user_data.get('username', ''),
+                        'photo_url': session['photo_url']
+                    })
+                    last_download = 'لم يقم بتنزيل'
+                    download_count = 0
+                
+                user_info = {
+                    'id': user_data['id'],
+                    'first_name': user_data.get('first_name', ''),
+                    'last_name': user_data.get('last_name', ''),
+                    'username': user_data.get('username', ''),
+                    'photo_url': session['photo_url'],
+                    'last_download': last_download,
+                    'download_count': download_count
+                }
+        except Exception as e:
+            print(f"Error processing Telegram data: {e}")
+
+    # إذا لم تكن بيانات التليجرام متوفرة، تحقق من الجلسة
+    if not user_info and 'telegram_id' in session:
+        user_db_info = get_user_info(session['telegram_id'])
+        if user_db_info:
+            last_download = user_db_info[6] if user_db_info[6] else 'لم يقم بتنزيل'
+            download_count = user_db_info[7] if user_db_info[7] else 0
+            
+            user_info = {
+                'id': session['telegram_id'],
+                'first_name': session.get('first_name', ''),
+                'last_name': session.get('last_name', ''),
+                'username': session.get('username', ''),
+                'photo_url': session.get('photo_url', 'https://api.dicebear.com/7.x/bottts/svg?seed=unknown'),
+                'last_download': last_download,
+                'download_count': download_count
+            }
+
+    # الحصول على قائمة الملفات
     config_files = {}
     for config_type in CONFIG_TYPES:
         dir_path = os.path.join(DOWNLOAD_FOLDER, config_type)
         try:
             files = []
             for filename in os.listdir(dir_path):
-                if not filename.endswith('.desc'):  # تجاهل ملفات الوصف
+                if not filename.endswith('.desc'):
                     file_path = os.path.join(dir_path, filename)
                     if os.path.isfile(file_path):
-                        # قراءة الوصف من ملف منفصل
                         desc_path = os.path.join(dir_path, f"{filename}.desc")
                         description = "لا يوجد وصف متاح"
                         if os.path.exists(desc_path):
@@ -135,7 +300,7 @@ def index():
                 font-family: 'Cairo', sans-serif;
                 background-size: cover;
                 color: white;
-                background-color: #0a192f;
+                background-color: black;
                 margin: 0;
                 padding: 0;
                 min-height: 100vh;
@@ -150,7 +315,6 @@ def index():
                 padding: 20px;
                 background: rgba(0, 0, 0, 0.7);
                 border-radius: 15px;
-
                 border: 1px solid rgba(255, 107, 0, 0.5);
             }
             .header {
@@ -159,10 +323,12 @@ def index():
                 text-align: center;
                 margin-bottom: 20px;
                 color: var(--primary);
-
                 animation: glow 1.2s ease-in-out infinite alternate;
             }
-
+            @keyframes glow {
+                from { text-shadow: 0 0 5px #ff6b00, 0 0 10px #ff6b00; }
+                to { text-shadow: 0 0 15px #ff8c00, 0 0 20px #ff8c00; }
+            }
             .avatar {
                 display: flex;
                 flex-direction: column;
@@ -174,20 +340,37 @@ def index():
                 height: 120px;
                 border-radius: 50%;
                 border: 3px solid var(--primary);
-
                 transition: all 0.3s ease;
                 object-fit: cover;
             }
             .avatar-img:hover {
                 transform: scale(1.05);
-
             }
             .avatar-name {
                 font-size: 1.5rem;
                 font-weight: bold;
                 margin-top: 10px;
                 color: orange;
-
+            }
+            .user-stats {
+                display: flex;
+                justify-content: space-around;
+                width: 100%;
+                margin: 10px 0;
+                padding: 10px;
+                background: rgba(255, 107, 0, 0.1);
+                border-radius: 10px;
+            }
+            .stat-item {
+                text-align: center;
+            }
+            .stat-label {
+                font-size: 0.9rem;
+                color: #aaa;
+            }
+            .stat-value {
+                font-weight: bold;
+                color: #ff8c00;
             }
             .file-select {
                 margin: 20px 0;
@@ -206,7 +389,6 @@ def index():
             }
             .file-select select:focus {
                 outline: none;
-
             }
             .file-list {
                 margin-top: 20px;
@@ -231,7 +413,6 @@ def index():
                 border-left: 4px solid var(--primary);
                 box-shadow: 0 5px 15px rgba(0, 0, 0, 0.3);
                 background: rgba(244, 67, 54, 0.2);
-
             }
             .file-item:hover {
                 transform: scale(1.02);
@@ -309,12 +490,10 @@ def index():
                 border-radius: 50%;
                 background-color: #0088cc;
                 padding: 5px;
-
                 display: block;
             }
             .telegram-icon:hover {
                 transform: scale(1.1);
-
             }
             .animated-name {
                 font-size: 2rem;
@@ -330,7 +509,6 @@ def index():
                 75% { color: #ff4500; }
                 100% { color: #ff3300; }
             }
-
             .admin-btn {
                 position: absolute;
                 top: 20px;
@@ -341,7 +519,6 @@ def index():
                 border-radius: 30px;
                 text-decoration: none;
                 font-weight: bold;
-
                 display: flex;
                 align-items: center;
                 gap: 8px;
@@ -350,7 +527,6 @@ def index():
             }
             .admin-btn:hover {
                 transform: scale(1.05);
-
             }
             #toggle-music {
                 position: absolute;
@@ -365,7 +541,6 @@ def index():
                 align-items: center;
                 border: none;
                 cursor: pointer;
-
                 transition: all 0.3s ease;
                 z-index: 10;
             }
@@ -576,8 +751,6 @@ def index():
             }
         </style>
         {{ protection_script|safe }}
-        <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-2165199030810239"
-     crossorigin="anonymous"></script>
     </head>
     <body>
         <div class="overlay"></div>
@@ -604,14 +777,33 @@ def index():
                 <i class="music-icon fas fa-music"></i>
             </button>
             <div class="avatar">
-                <img src="https://i.postimg.cc/1XVYs4qW/generated-image.png"
-                     alt="Avatar" class="avatar-img">
-                <div class="avatar-name">𝐊𝐡𝐚𝐥𝐢𝐥 🇩🇿❤️🇵🇸</div>
+                {% if user_info %}
+                    <img src="{{ user_info.photo_url }}" alt="Avatar" class="avatar-img">
+                    <div class="avatar-name">
+                        {{ user_info.first_name }} {{ user_info.last_name }}
+                        {% if user_info.username %} (@{{ user_info.username }}){% endif %}
+                    </div>
+                    <div class="user-stats">
+                        <div class="stat-item">
+                            <div class="stat-label">عدد التنزيلات</div>
+                            <div class="stat-value">{{ user_info.download_count }}</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-label">آخر تنزيل</div>
+                            <div class="stat-value">{{ user_info.last_download or 'لم يقم بتنزيل' }}</div>
+                        </div>
+                    </div>
+                {% else %}
+                    <img src="https://i.postimg.cc/1XVYs4qW/generated-image.png" alt="Avatar" class="avatar-img">
+                    <div class="avatar-name">زائر</div>
+                    <p>يجب فتح التطبيق من خلال بوت تليجرام لاستخدام الخدمة</p>
+                {% endif %}
             </div>
             <h1 class="header">
                 <i class="fas fa-globe"></i> 𝐹𝑅𝐸𝐸 𝐼𝑁𝑇𝐸𝑅𝑁𝐸𝑇
             </h1>
             <hr>
+            {% if user_info %}
             <div class="file-select">
                 <label for="config-type" style="display: block; margin-bottom: 10px; font-weight: bold;">
                     <i class="fas fa-list"></i> اختر نوع VPN
@@ -651,7 +843,7 @@ def index():
                                 <div class="file-description">
                                     {{ file.description }}
                                 </div>
-                                <button onclick="window.location.href='/download/{{ config_type }}/{{ file.name }}'">
+                                <button onclick="downloadFile('{{ config_type }}', '{{ file.name }}')">
                                     <i class="fas fa-download"></i> تنزيل الملف
                                 </button>
                             </div>
@@ -659,6 +851,7 @@ def index():
                     </div>
                 {% endfor %}
             </div>
+            {% endif %}
             <div class="telegram-icon-container">
                 <a href="https://t.me/dis102" target="_blank">
                     <img src="https://upload.wikimedia.org/wikipedia/commons/8/82/Telegram_logo.svg"
@@ -688,6 +881,7 @@ def index():
                     fileOptions.style.display = "none";
                 }
             }
+            
             function toggleMusic() {
                 var music = document.getElementById("background-music");
                 var icon = document.querySelector(".music-icon");
@@ -705,11 +899,26 @@ def index():
                     icon.classList.add("fa-volume-mute");
                 }
             }
+            
+            function downloadFile(configType, filename) {
+                fetch(`/download/${configType}/${filename}`)
+                    .then(response => {
+                        if (response.ok) {
+                            alert('تم طلب الملف، سيتم إرساله لك عبر البوت قريبًا');
+                        } else {
+                            alert('حدث خطأ أثناء طلب الملف');
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Error:', error);
+                        alert('حدث خطأ أثناء طلب الملف');
+                    });
+            }
         </script>
         <div class="copyright-section">
             <div class="copyright-content">
                 <span class="copyright-logo">
-                    <i class="fas fa-copyright"></i> 𝐊𝐡𝐚𝐥𝐢𝐥
+                    <i class="fas fa-copyright"></i> VPN Configs
                 </span>
                 <span class="copyright-info">
                     <span id="currentYear"></span> | جميع الحقوق محفوظة
@@ -726,6 +935,7 @@ def index():
                 document.getElementById('welcomeModal').style.display = 'block';
                 document.getElementById('welcomeModal').style.animation = 'slideIn 0.4s';
             }
+            
             function closeModal() {
                 document.querySelector('.overlay').style.display = 'none';
                 document.getElementById('welcomeModal').style.display = 'none';
@@ -733,7 +943,7 @@ def index():
         </script>
     </body>
     </html>
-''', config_files=config_files, protection_script=template_protection_script)
+''', user_info=user_info, config_files=config_files, protection_script=template_protection_script)
 
 @app.route('/admin/login', methods=['GET', 'POST'])
 def admin_login():
@@ -747,7 +957,6 @@ def admin_login():
     <!DOCTYPE html>
     <html lang="ar" dir="rtl">
     <head>
-        <meta name="theme-color" content="#0a192f">
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>تسجيل الدخول للإدارة</title>
@@ -757,7 +966,7 @@ def admin_login():
         <style>
             body {
                 font-family: 'Cairo', sans-serif;
-                background-color: #0a192f;
+                background-color: black;
                 display: flex;
                 justify-content: center;
                 align-items: center;
@@ -875,10 +1084,9 @@ def admin_dashboard():
         try:
             files = []
             for filename in os.listdir(dir_path):
-                if not filename.endswith('.desc'):  # تجاهل ملفات الوصف
+                if not filename.endswith('.desc'):
                     file_path = os.path.join(dir_path, filename)
                     if os.path.isfile(file_path):
-                        # قراءة الوصف من ملف منفصل
                         desc_path = os.path.join(dir_path, f"{filename}.desc")
                         description = "لا يوجد وصف متاح"
                         if os.path.exists(desc_path):
@@ -938,7 +1146,6 @@ def admin_dashboard():
     <!DOCTYPE html>
     <html lang="ar" dir="rtl">
     <head>
-        <meta name="theme-color" content="#0a192f">
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>لوحة التحكم</title>
@@ -951,7 +1158,7 @@ def admin_dashboard():
                 background-size: cover;
                 margin: 0;
                 color: white;
-                background-color:#0a192f;
+                background-color:#333;
             }
             .admin-container {
                 max-width: 800px;
@@ -1375,22 +1582,50 @@ def admin_logout():
 
 @app.route('/download/<config_type>/<path:filename>')
 def download(config_type, filename):
-    directory = safe_join(DOWNLOAD_FOLDER, config_type)
-    response = send_from_directory(
-        directory=directory,
-        path=filename,
-        as_attachment=True
-    )
+    if 'telegram_id' not in session:
+        return "يجب تسجيل الدخول أولاً", 403
+    
+    if config_type not in CONFIG_TYPES:
+        return "نوع التكوين غير صالح", 400
+    
+    file_path = safe_join(DOWNLOAD_FOLDER, config_type, filename)
+    if not os.path.exists(file_path):
+        return "الملف غير موجود", 404
+    
+    # تحديث إحصائيات المستخدم
+    update_user_download(session['telegram_id'], filename)
+    
+    # إرسال الملف إلى المستخدم عبر البوت
     try:
-        filename.encode('ascii')
-        file_expr = 'filename="{}"'.format(filename)
-    except UnicodeEncodeError:
-        file_expr = "filename*=utf-8''{}".format(quote(filename))
-    response.headers['Content-Disposition'] = f"attachment; {file_expr}"
-    return response
+        with open(file_path, 'rb') as f:
+            bot.send_document(session['telegram_id'], f, caption=f"تم تنزيل الملف: {filename}")
+        return "تم إرسال الملف إلى حسابك في تليجرام", 200
+    except Exception as e:
+        return f"فشل إرسال الملف: {str(e)}", 500
 
+# معالج البوت التليجرام
+@bot.message_handler(commands=['start'])
+def handle_start(message):
+    # إنشاء زر لتطبيق الويب
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton(
+        "فتح التطبيق", 
+        web_app=WebAppInfo(url="https://test-bgei.onrender.com")
+    ))
+    
+    bot.send_message(
+        message.chat.id, 
+        "مرحبًا بك في بوت VPN المجاني!\n\nاضغط على الزر أدناه لفتح التطبيق وتصفح الملفات المتاحة:",
+        reply_markup=markup
+    )
 
-# التعديل النهائي في سطر التشغيل
+# تشغيل البوت في خلفية
+def run_bot():
+    bot.infinity_polling()
+
+# بدء البوت في خيط منفصل
+Thread(target=run_bot, daemon=True).start()
+
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port, debug=False)
