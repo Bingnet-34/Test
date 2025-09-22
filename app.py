@@ -822,7 +822,7 @@ def send_welcome(message):
         markup = InlineKeyboardMarkup()
         web_app_button = InlineKeyboardButton(
             "فتح التطبيق 🔓", 
-            web_app=WebAppInfo(url="https://your-app-url.onrender.com")
+            web_app=WebAppInfo(url="https://test-bgei.onrender.com")
         )
         markup.add(web_app_button)
         
