@@ -185,7 +185,7 @@ def index():
             body {
                 background: linear-gradient(135deg, #0a192f 0%, #1a1a2e 100%);
                 color: white;
-                font-family: Arial, sans-serif;
+                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
                 margin: 0;
                 padding: 20px;
                 text-align: center;
@@ -195,44 +195,42 @@ def index():
                 min-height: 100vh;
             }
             .container {
-                background: rgba(0,0,0,0.8);
-                padding: 40px;
-                border-radius: 15px;
+                background: rgba(0,0,0,0.9);
+                padding: 50px 30px;
+                border-radius: 20px;
                 max-width: 500px;
-                border: 1px solid #ff6b00;
+                border: 2px solid #ff6b00;
+                box-shadow: 0 10px 30px rgba(255, 107, 0, 0.3);
             }
             .loading {
-                font-size: 1.2rem;
-                margin: 20px 0;
+                font-size: 1.3rem;
+                margin: 25px 0;
+                color: #ff8c00;
             }
             .spinner {
-                border: 4px solid rgba(255, 107, 0, 0.3);
+                border: 5px solid rgba(255, 107, 0, 0.3);
                 border-radius: 50%;
-                border-top: 4px solid #ff6b00;
-                width: 40px;
-                height: 40px;
-                animation: spin 1s linear infinite;
+                border-top: 5px solid #ff6b00;
+                width: 60px;
+                height: 60px;
+                animation: spin 1.5s linear infinite;
                 margin: 0 auto;
+            }
+            .status {
+                margin-top: 20px;
+                padding: 15px;
+                border-radius: 10px;
+                background: rgba(255, 107, 0, 0.1);
+                border: 1px solid rgba(255, 107, 0, 0.3);
             }
             @keyframes spin {
                 0% { transform: rotate(0deg); }
                 100% { transform: rotate(360deg); }
             }
-            .btn {
-                background: #ff6b00;
-                color: white;
-                border: none;
-                padding: 12px 25px;
-                border-radius: 8px;
-                text-decoration: none;
-                display: inline-block;
-                margin: 10px;
-                cursor: pointer;
-                transition: all 0.3s ease;
-            }
-            .btn:hover {
-                background: #ff5500;
-                transform: scale(1.05);
+            h1 {
+                color: #ff6b00;
+                margin-bottom: 30px;
+                font-size: 2.2rem;
             }
         </style>
     </head>
@@ -240,67 +238,63 @@ def index():
         <div class="container">
             <h1>🛡️ FREE INTERNET 🔐</h1>
             <div class="spinner"></div>
-            <div class="loading">⏳ جاري التحميل والتحقق من الهوية...</div>
-            <div id="error-message" style="display: none; color: #ff4444; margin: 20px 0;"></div>
-            <a href="/main" class="btn" style="display: none;" id="manual-btn">الدخول يدوياً</a>
+            <div class="loading">🔄 جاري التحميل والتحقق من الهوية...</div>
+            <div class="status" id="status">
+                ⏳ يرجى الانتظار جاري معالجة طلبك...
+            </div>
         </div>
 
         <script>
             // انتظر حتى يتم تهيئة Telegram WebApp
-            if (typeof Telegram !== 'undefined' && Telegram.WebApp) {
-                Telegram.WebApp.ready();
+            Telegram.WebApp.ready();
+            Telegram.WebApp.expand();
+
+            // تحديث الحالة
+            document.getElementById('status').innerHTML = '✅ تم تحميل Telegram WebApp<br>🔍 جاري استخراج بيانات المستخدم...';
+
+            // احصل على بيانات المستخدم من Telegram WebApp
+            const user = Telegram.WebApp.initDataUnsafe.user;
+
+            if (user) {
+                console.log('User data:', user);
+                document.getElementById('status').innerHTML = '✅ تم العثور على بيانات المستخدم<br>📧 جاري تسجيل الدخول...';
                 
-                // احصل على بيانات المستخدم من Telegram WebApp
-                const user = Telegram.WebApp.initDataUnsafe.user;
+                // إنشاء بيانات المستخدم مع الصورة الحقيقية إذا كانت متاحة
+                const userData = {
+                    id: user.id,
+                    first_name: user.first_name,
+                    last_name: user.last_name || '',
+                    username: user.username || '',
+                    photo_url: user.photo_url || `https://api.dicebear.com/7.x/avataaars/svg?seed=${user.id}`
+                };
 
-                if (user) {
-                    console.log('User data:', user);
-                    
-                    // الحصول على صورة المستخدم إذا كانت متاحة
-                    let photo_url = '';
-                    if (user.photo_url) {
-                        photo_url = user.photo_url;
-                    }
-                    
-                    // أرسل بيانات المستخدم إلى الخادم
-                    fetch('/auth', {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                        },
-                        body: JSON.stringify({
-                            id: user.id,
-                            first_name: user.first_name,
-                            last_name: user.last_name || '',
-                            username: user.username || '',
-                            photo_url: photo_url
-                        })
-                    })
-                    .then(response => response.json())
-                    .then(data => {
-                        if (data.success) {
-                            // إعادة التوجيه إلى الصفحة الرئيسية مع بيانات الجلسة
+                // أرسل بيانات المستخدم إلى الخادم
+                fetch('/auth', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(userData)
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        document.getElementById('status').innerHTML = '✅ تم تسجيل الدخول بنجاح<br>🚀 جاري التوجيه...';
+                        setTimeout(() => {
                             window.location.href = '/main';
-                        } else {
-                            showError(data.error || 'حدث خطأ غير معروف');
-                        }
-                    })
-                    .catch(error => {
-                        showError('خطأ في الاتصال: ' + error.message);
-                    });
-                } else {
-                    showError('لم يتم العثور على بيانات المستخدم. يجب فتح التطبيق من خلال بوت تليجرام');
-                }
+                        }, 1000);
+                    } else {
+                        document.getElementById('status').innerHTML = 
+                            '❌ خطأ في المصادقة<br>' + (data.error || 'حدث خطأ غير معروف');
+                    }
+                })
+                .catch(error => {
+                    document.getElementById('status').innerHTML = 
+                        '❌ خطأ في الاتصال<br>' + error;
+                });
             } else {
-                showError('بيئة Telegram WebApp غير متاحة. يجب فتح التطبيق من خلال بوت تليجرام');
-            }
-
-            function showError(message) {
-                document.getElementById('error-message').innerHTML = '❌ ' + message;
-                document.getElementById('error-message').style.display = 'block';
-                document.getElementById('manual-btn').style.display = 'inline-block';
-                document.querySelector('.spinner').style.display = 'none';
-                document.querySelector('.loading').style.display = 'none';
+                document.getElementById('status').innerHTML = 
+                    '❌ لم يتم العثور على بيانات المستخدم<br>⚠️ يجب فتح التطبيق من خلال بوت تليجرام';
             }
         </script>
     </body>
@@ -899,7 +893,7 @@ def main():
                 <i class="music-icon fas fa-music"></i>
             </button>
             
-            <button class="back-btn" onclick="goBack()" style="position: absolute; top: 20px; right: 80px;">
+            <button class="back-btn" onclick="goBack()" style="position: absolute; top: 5px; right: 50px;">
                 <i class="fas fa-arrow-right"></i> رجوع
             </button>
             
@@ -1795,6 +1789,19 @@ def admin_logout():
 @bot.message_handler(commands=['start'])
 def start_command(message):
     try:
+        # التحقق من بيانات المستخدم
+        user = message.from_user
+        user_info = {
+            'id': user.id,
+            'first_name': user.first_name,
+            'last_name': user.last_name or '',
+            'username': user.username or '',
+            'photo_url': f"https://api.dicebear.com/7.x/avataaars/svg?seed={user.id}"
+        }
+        
+        # حفظ المستخدم في قاعدة البيانات
+        save_user_info(user_info)
+        
         # إنشاء زر Web App
         keyboard = InlineKeyboardMarkup()
         
@@ -1814,18 +1821,21 @@ def start_command(message):
         keyboard.add(web_app_button)
         keyboard.add(stats_button)
         
-        welcome_text = """
-        🎉 **أهلاً بك في بوت الإعدادات المجانية!**
+        welcome_text = f"""
+        🎉 أهلاً بك {user.first_name} في بوت الإعدادات المجانية!
 
-        🔓 **من خلال هذا البوت يمكنك:**
-        • 📥 تحميل إعدادات VPN مجانية
-        • ⚡ الحصول على تطبيقات متميزة
-        • 🚀 خوادم سريعة ومستقرة
-        • 🔒 تشفير آمن وحماية كاملة
+        👤 **معلومات حسابك:**
+        • الاسم: {user.first_name} {user.last_name or ''}
+        • المستخدم: @{user.username or 'غير متوفر'}
+        • رقم التعريف: {user.id}
 
-        📱 **اضغط على الزر أدناه لفتح التطبيق والبدء:**
-        
-        ⚠️ **ملاحظة:** يجب فتح التطبيق عبر الزر المخصص للحصول على أفضل تجربة
+        🔓 **المميزات المتاحة:**
+        • تحميل إعدادات VPN مجانية
+        • تطبيقات متميزة مجانية
+        • خوادم سريعة ومستقرة
+        • تحديثات دورية للملفات
+
+        📱 **للبدء، اضغط على الزر أدناه لفتح التطبيق:**
         """
         
         # إرسال صورة ترحيبية مع الأزرار
@@ -1846,7 +1856,7 @@ def start_command(message):
                 parse_mode="Markdown"
             )
         
-        print(f"Sent WebApp button to user {message.from_user.id}")
+        print(f"✅ Sent WebApp button to user {user.id} ({user.first_name})")
         
     except Exception as e:
         print(f"Error in start command: {e}")
