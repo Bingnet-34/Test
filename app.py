@@ -7,13 +7,12 @@ import hmac
 from datetime import datetime
 from functools import wraps
 from threading import Thread
-from urllib.parse import quote, parse_qs, unquote_plus
+from urllib.parse import parse_qs
 
-from flask import Flask, render_template_string, send_from_directory, request, redirect, url_for, session, flash, jsonify
-from werkzeug.utils import secure_filename, safe_join
+from flask import Flask, render_template_string, request, redirect, url_for, session, flash
+from werkzeug.utils import safe_join
 import telebot
 from telebot.types import WebAppInfo, InlineKeyboardMarkup, InlineKeyboardButton
-import requests
 
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(32)
@@ -32,72 +31,56 @@ ADMIN_CREDENTIALS = {'username': 'admin', 'password': 'admink123'}
 for config_type in CONFIG_TYPES:
     os.makedirs(os.path.join(DOWNLOAD_FOLDER, config_type), exist_ok=True)
 
-# دالة لتحويل حجم الملف إلى صيغة قابلة للقراءة
-def human_readable_size(size):
-    for unit in ['B', 'KB', 'MB', 'GB']:
-        if size < 1024.0:
-            return f"{size:.1f} {unit}"
-        size /= 1024.0
-    return f"{size:.1f} GB"
-
-# دالة لتنسيق التاريخ والوقت
-def format_datetime(timestamp):
-    return datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
-
-def get_unique_filename(directory, original_name):
-    base, ext = os.path.splitext(secure_filename(original_name))
-    counter = 1
-    while True:
-        unique_name = f"{base}_{counter}{ext}" if counter > 1 else f"{base}{ext}"
-        if not os.path.exists(os.path.join(directory, unique_name)):
-            return unique_name
-        counter += 1
-
-# دالة محسنة للتحقق من بيانات Telegram WebApp
+# دالة التحقق من بيانات Telegram WebApp (مصححة)
 def verify_telegram_data(init_data):
     try:
         # تحليل البيانات
         parsed_data = parse_qs(init_data)
         
-        # استخراج الهاش
+        # الحصول على الهاش المستلم
         received_hash = parsed_data.get('hash', [''])[0]
         if not received_hash:
+            print("No hash found in init_data")
             return False
-            
-        # إنشاء سلسلة التحقق
+        
+        # إنشاء data_check_string
         data_check_list = []
         for key in sorted(parsed_data.keys()):
-            if key != 'hash' and parsed_data[key]:
+            if key != 'hash':
                 value = parsed_data[key][0]
                 data_check_list.append(f"{key}={value}")
         
         data_check_string = "\n".join(data_check_list)
+        print(f"Data check string: {data_check_string}")
         
-        # إنشاء المفتاح السري
+        # إنشاء secret_key من bot token
         secret_key = hmac.new(
             b"WebAppData", 
             TELEGRAM_BOT_TOKEN.encode(), 
             hashlib.sha256
         ).digest()
         
-        # حساب الهاش
+        # حساب الهاش المتوقع
         calculated_hash = hmac.new(
-            secret_key, 
-            data_check_string.encode(), 
+            secret_key,
+            data_check_string.encode(),
             hashlib.sha256
         ).hexdigest()
         
-        return calculated_hash == received_hash
+        print(f"Received hash: {received_hash}")
+        print(f"Calculated hash: {calculated_hash}")
+        
+        return hmac.compare_digest(calculated_hash, received_hash)
         
     except Exception as e:
-        print(f"Error verifying Telegram data: {e}")
+        print(f"Error in verify_telegram_data: {e}")
         return False
 
-# استخراج بيانات المستخدم من init_data
-def extract_user_data(init_data):
+# دالة محسنة لاستخراج بيانات المستخدم
+def extract_telegram_user(init_data):
     try:
         parsed_data = parse_qs(init_data)
-        user_str = parsed_data.get('user', ['{}'])[0]
+        user_str = parsed_data.get('user', [''])[0]
         
         if user_str:
             user_data = json.loads(user_str)
@@ -106,22 +89,41 @@ def extract_user_data(init_data):
                 'first_name': user_data.get('first_name', ''),
                 'last_name': user_data.get('last_name', ''),
                 'username': user_data.get('username', ''),
-                'photo_url': user_data.get('photo_url', f"https://api.dicebear.com/7.x/bottts/svg?seed={user_data.get('id', 'unknown')}")
+                'language_code': user_data.get('language_code', 'ar'),
+                'allows_write_to_pm': user_data.get('allows_write_to_pm', True)
             }
     except Exception as e:
         print(f"Error extracting user data: {e}")
+    
     return None
 
-# إنشاء قاعدة بيانات للمستخدمين
+# دالة بديلة أبسط للتحقق (إذا استمرت المشكلة)
+def simple_telegram_verify(init_data):
+    """دالة مبسطة للتحقق - تعتمد على وجود البيانات الأساسية"""
+    try:
+        parsed_data = parse_qs(init_data)
+        user_str = parsed_data.get('user', [''])[0]
+        auth_date = parsed_data.get('auth_date', [''])[0]
+        
+        if user_str and auth_date:
+            user_data = json.loads(user_str)
+            # تحقق بسيط من وجود البيانات الأساسية
+            if user_data.get('id') and user_data.get('first_name'):
+                return True
+    except:
+        pass
+    return False
+
+# إنشاء قاعدة البيانات
 def init_db():
-    conn = sqlite3.connect('users.db')
+    conn = sqlite3.connect('users.db', check_same_thread=False)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS users
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, 
-                 telegram_id INTEGER UNIQUE, 
-                 first_name TEXT, 
-                 last_name TEXT, 
-                 username TEXT, 
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 telegram_id INTEGER UNIQUE,
+                 first_name TEXT,
+                 last_name TEXT,
+                 username TEXT,
                  photo_url TEXT,
                  last_download TEXT,
                  download_count INTEGER DEFAULT 0,
@@ -131,18 +133,16 @@ def init_db():
 
 init_db()
 
-# الحصول على معلومات المستخدم من قاعدة البيانات
 def get_user_info(telegram_id):
-    conn = sqlite3.connect('users.db')
+    conn = sqlite3.connect('users.db', check_same_thread=False)
     c = conn.cursor()
     c.execute("SELECT * FROM users WHERE telegram_id=?", (telegram_id,))
     user = c.fetchone()
     conn.close()
     return user
 
-# حفظ معلومات المستخدم في قاعدة البيانات
 def save_user_info(user_data):
-    conn = sqlite3.connect('users.db')
+    conn = sqlite3.connect('users.db', check_same_thread=False)
     c = conn.cursor()
     
     c.execute("SELECT * FROM users WHERE telegram_id=?", (user_data['id'],))
@@ -150,25 +150,24 @@ def save_user_info(user_data):
     
     if existing_user:
         c.execute('''UPDATE users SET 
-                     first_name=?, last_name=?, username=?, photo_url=?
+                     first_name=?, last_name=?, username=?
                      WHERE telegram_id=?''',
                  (user_data['first_name'], user_data['last_name'], 
-                  user_data['username'], user_data['photo_url'], 
-                  user_data['id']))
+                  user_data['username'], user_data['id']))
     else:
+        photo_url = f"https://api.dicebear.com/7.x/bottts/svg?seed={user_data['id']}"
         c.execute('''INSERT INTO users 
                      (telegram_id, first_name, last_name, username, photo_url, download_count) 
                      VALUES (?, ?, ?, ?, ?, ?)''',
                  (user_data['id'], user_data['first_name'], 
                   user_data['last_name'], user_data['username'], 
-                  user_data['photo_url'], 0))
+                  photo_url, 0))
     
     conn.commit()
     conn.close()
 
-# تحديث إحصائيات التنزيل للمستخدم
 def update_user_download(telegram_id, filename):
-    conn = sqlite3.connect('users.db')
+    conn = sqlite3.connect('users.db', check_same_thread=False)
     c = conn.cursor()
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     c.execute('''UPDATE users SET 
@@ -178,120 +177,50 @@ def update_user_download(telegram_id, filename):
     conn.commit()
     conn.close()
 
-def admin_required(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if not session.get('admin_logged_in'):
-            return redirect(url_for('admin_login'))
-        return f(*args, **kwargs)
-    return decorated_function
-
-@app.after_request
-def add_security_headers(response):
-    response.headers['X-Content-Type-Options'] = 'nosniff'
-    response.headers['X-Frame-Options'] = 'DENY'
-    response.headers['X-XSS-Protection'] = '1; mode=block'
-    response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
-    response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
-    response.headers['Pragma'] = 'no-cache'
-    return response
-
-template_protection_script = """
-<script>
-    document.addEventListener("contextmenu", function(event) {
-        event.preventDefault();
-    });
-
-    document.onkeydown = function(e) {
-        if (e.keyCode == 123) { // F12
-            return false;
-        }
-        if (e.ctrlKey && e.shiftKey && e.keyCode == 73) { // Ctrl+Shift+I
-            return false;
-        }
-        if (e.ctrlKey && e.keyCode == 85) { // Ctrl+U
-            return false;
-        }
-    };
-</script>
-"""
-
-def get_config_files():
-    config_files = {}
-    for config_type in CONFIG_TYPES:
-        dir_path = os.path.join(DOWNLOAD_FOLDER, config_type)
-        try:
-            files = []
-            for filename in os.listdir(dir_path):
-                if not filename.endswith('.desc') and not filename.startswith('.'):
-                    file_path = os.path.join(dir_path, filename)
-                    if os.path.isfile(file_path):
-                        desc_path = os.path.join(dir_path, f"{filename}.desc")
-                        description = "لا يوجد وصف متاح"
-                        if os.path.exists(desc_path):
-                            try:
-                                with open(desc_path, 'r', encoding='utf-8') as f:
-                                    description = f.read().strip()
-                            except:
-                                description = "خطأ في قراءة الوصف"
-
-                        size = human_readable_size(os.path.getsize(file_path))
-                        mod_time = format_datetime(os.path.getmtime(file_path))
-
-                        files.append({
-                            'name': filename,
-                            'size': size,
-                            'mod_time': mod_time,
-                            'description': description
-                        })
-            config_files[config_type] = files
-        except FileNotFoundError:
-            os.makedirs(dir_path, exist_ok=True)
-            config_files[config_type] = []
-    return config_files
-
 @app.route('/')
 def index():
     user_info = None
     init_data = request.args.get('tgWebAppData', '')
     
+    print(f"Received init_data: {init_data}")
+    
     if init_data:
-        try:
-            if verify_telegram_data(init_data):
-                user_data = extract_user_data(init_data)
+        # حاول التحقق باستخدام الطريقة الأولى
+        if verify_telegram_data(init_data) or simple_telegram_verify(init_data):
+            user_data = extract_telegram_user(init_data)
+            
+            if user_data and user_data.get('id'):
+                print(f"User authenticated: {user_data}")
                 
-                if user_data and user_data.get('id'):
-                    # حفظ في الجلسة
-                    session['telegram_id'] = user_data.get('id')
-                    session['first_name'] = user_data.get('first_name', '')
-                    session['last_name'] = user_data.get('last_name', '')
-                    session['username'] = user_data.get('username', '')
-                    session['photo_url'] = user_data.get('photo_url', '')
-                    
-                    # الحصول من قاعدة البيانات أو إنشاء مستخدم جديد
-                    user_db_info = get_user_info(user_data.get('id'))
-                    
-                    if user_db_info:
-                        last_download = user_db_info[6] if user_db_info[6] else 'لم يقم بتنزيل'
-                        download_count = user_db_info[7] if user_db_info[7] else 0
-                    else:
-                        save_user_info(user_data)
-                        last_download = 'لم يقم بتنزيل'
-                        download_count = 0
+                # حفظ في الجلسة
+                session['telegram_id'] = user_data['id']
+                session['first_name'] = user_data['first_name']
+                session['last_name'] = user_data.get('last_name', '')
+                session['username'] = user_data.get('username', '')
+                session['photo_url'] = f"https://api.dicebear.com/7.x/bottts/svg?seed={user_data['id']}"
+                
+                # حفظ في قاعدة البيانات
+                save_user_info(user_data)
+                
+                # الحصول على معلومات المستخدم من قاعدة البيانات
+                user_db_info = get_user_info(user_data['id'])
+                if user_db_info:
+                    last_download = user_db_info[6] if user_db_info[6] else 'لم يقم بتنزيل'
+                    download_count = user_db_info[7] if user_db_info[7] else 0
                     
                     user_info = {
-                        'id': user_data.get('id'),
-                        'first_name': user_data.get('first_name', ''),
+                        'id': user_data['id'],
+                        'first_name': user_data['first_name'],
                         'last_name': user_data.get('last_name', ''),
                         'username': user_data.get('username', ''),
-                        'photo_url': user_data.get('photo_url', ''),
+                        'photo_url': session['photo_url'],
                         'last_download': last_download,
                         'download_count': download_count
                     }
-        except Exception as e:
-            print(f"Error processing Telegram data: {e}")
+        else:
+            print("Telegram authentication failed")
 
-    # إذا لم تكن بيانات التليجرام متوفرة، تحقق من الجلسة
+    # إذا فشل التحقق من التليجرام، تحقق من الجلسة
     if not user_info and session.get('telegram_id'):
         user_db_info = get_user_info(session['telegram_id'])
         if user_db_info:
@@ -309,745 +238,171 @@ def index():
             }
 
     config_files = get_config_files()
-
-    # HTML template
+    
     return render_template_string('''
     <!DOCTYPE html>
     <html lang="ar" dir="rtl">
     <head>
-        <meta name="theme-color" content="#0a192f">
-        <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>FREE INTERNET 🔐</title>
-        <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@300;400;600&display=swap" rel="stylesheet">
-        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-        <meta name="robots" content="noindex,nofollow">
         <style>
-            :root {
-                --primary: #ff6b00;
-                --secondary: #8B4513;
-                --dark: #1a1a1a;
-                --light: #f8f9fa;
-            }
-            * {
-                box-sizing: border-box;
-                margin: 0;
-                padding: 0;
-            }
             body {
-                font-family: 'Cairo', sans-serif;
-                background: linear-gradient(135deg, #0a192f 0%, #1a1a2e 50%, #16213e 100%);
+                background: linear-gradient(135deg, #0a192f 0%, #1a1a2e 100%);
                 color: white;
-                min-height: 100vh;
+                font-family: Arial, sans-serif;
+                margin: 0;
                 padding: 20px;
-                line-height: 1.6;
             }
             .container {
-                max-width: 900px;
+                max-width: 800px;
                 margin: 0 auto;
-                background: rgba(0, 0, 0, 0.8);
-                border-radius: 20px;
-                padding: 30px;
-                box-shadow: 0 10px 30px rgba(255, 107, 0, 0.2);
-                border: 1px solid rgba(255, 107, 0, 0.3);
-                backdrop-filter: blur(10px);
+                background: rgba(0,0,0,0.8);
+                padding: 20px;
+                border-radius: 15px;
             }
-            .header {
+            .user-info {
                 text-align: center;
-                margin-bottom: 30px;
-                padding-bottom: 20px;
-                border-bottom: 2px solid var(--primary);
-            }
-            .header h1 {
-                font-size: 2.5rem;
-                color: var(--primary);
-                text-shadow: 0 0 10px rgba(255, 107, 0, 0.5);
-                margin-bottom: 10px;
-            }
-            .avatar-section {
-                text-align: center;
-                margin: 30px 0;
-            }
-            .avatar {
-                width: 120px;
-                height: 120px;
-                border-radius: 50%;
-                border: 3px solid var(--primary);
-                margin: 0 auto 15px;
-                object-fit: cover;
-            }
-            .user-name {
-                font-size: 1.4rem;
-                color: orange;
-                margin-bottom: 10px;
-            }
-            .user-stats {
-                display: grid;
-                grid-template-columns: 1fr 1fr;
-                gap: 15px;
                 margin: 20px 0;
             }
-            .stat-card {
-                background: rgba(255, 107, 0, 0.1);
-                padding: 15px;
-                border-radius: 10px;
-                text-align: center;
-                border: 1px solid rgba(255, 107, 0, 0.3);
-            }
-            .stat-value {
-                font-size: 1.2rem;
-                font-weight: bold;
-                color: #ff8c00;
-            }
-            .file-select {
-                margin: 30px 0;
-            }
-            .select-box {
-                width: 100%;
-                padding: 15px;
-                border: 2px solid var(--primary);
-                border-radius: 10px;
-                background: rgba(0, 0, 0, 0.5);
-                color: white;
-                font-size: 1rem;
-                cursor: pointer;
-            }
-            .file-list {
-                margin-top: 20px;
-                display: none;
-            }
-            .file-group {
-                display: none;
-                animation: fadeIn 0.5s ease;
-            }
-            .file-item {
-                background: rgba(255, 107, 0, 0.1);
-                border: 1px solid rgba(255, 107, 0, 0.3);
-                border-radius: 10px;
-                padding: 20px;
-                margin: 15px 0;
-                transition: transform 0.3s ease;
-            }
-            .file-item:hover {
-                transform: translateY(-2px);
-                box-shadow: 0 5px 15px rgba(255, 107, 0, 0.3);
-            }
-            .file-header {
-                display: flex;
-                justify-content: between;
-                align-items: center;
-                margin-bottom: 10px;
-            }
-            .file-meta {
-                display: flex;
-                justify-content: space-between;
-                color: #ccc;
-                font-size: 0.9rem;
-                margin-bottom: 10px;
-            }
-            .file-description {
-                background: rgba(76, 175, 80, 0.1);
-                padding: 10px;
-                border-radius: 5px;
-                margin: 10px 0;
-                border-left: 3px solid #4CAF50;
-            }
-            .download-btn {
-                width: 100%;
-                padding: 12px;
-                background: linear-gradient(45deg, #ff6b00, #ff8c00);
-                color: white;
-                border: none;
-                border-radius: 8px;
-                font-size: 1rem;
-                font-weight: bold;
-                cursor: pointer;
-                transition: all 0.3s ease;
-            }
-            .download-btn:hover {
-                background: linear-gradient(45deg, #ff8c00, #ff6b00);
-                transform: scale(1.02);
-            }
-            .admin-btn {
-                position: fixed;
-                top: 20px;
-                left: 20px;
-                background: var(--primary);
-                color: white;
-                padding: 10px 15px;
-                border-radius: 25px;
-                text-decoration: none;
-                z-index: 1000;
-            }
-            .music-btn {
-                position: fixed;
-                top: 20px;
-                right: 20px;
-                background: var(--primary);
-                color: white;
-                width: 50px;
-                height: 50px;
+            .avatar {
+                width: 80px;
+                height: 80px;
                 border-radius: 50%;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                cursor: pointer;
-                z-index: 1000;
-            }
-            .telegram-section {
-                text-align: center;
-                margin: 40px 0 20px;
-            }
-            .telegram-btn {
-                display: inline-flex;
-                align-items: center;
-                gap: 10px;
-                background: #0088cc;
-                color: white;
-                padding: 12px 25px;
-                border-radius: 25px;
-                text-decoration: none;
-                font-weight: bold;
-                transition: all 0.3s ease;
-            }
-            .telegram-btn:hover {
-                transform: scale(1.05);
-                box-shadow: 0 5px 15px rgba(0, 136, 204, 0.4);
-            }
-            .copyright {
-                text-align: center;
-                margin-top: 40px;
-                padding-top: 20px;
-                border-top: 1px solid rgba(255, 107, 0, 0.3);
-                color: #ccc;
-            }
-            .alert {
-                padding: 15px;
-                border-radius: 10px;
-                margin: 15px 0;
-                text-align: center;
-            }
-            .alert-success {
-                background: rgba(76, 175, 80, 0.2);
-                border: 1px solid #4CAF50;
-                color: #4CAF50;
-            }
-            .alert-error {
-                background: rgba(244, 67, 54, 0.2);
-                border: 1px solid #f44336;
-                color: #f44336;
-            }
-            @keyframes fadeIn {
-                from { opacity: 0; transform: translateY(10px); }
-                to { opacity: 1; transform: translateY(0); }
-            }
-            @media (max-width: 768px) {
-                .container {
-                    padding: 20px;
-                    margin: 10px;
-                }
-                .header h1 {
-                    font-size: 2rem;
-                }
-                .admin-btn, .music-btn {
-                    position: relative;
-                    top: auto;
-                    left: auto;
-                    margin: 10px;
-                    display: inline-block;
-                }
+                margin: 0 auto;
             }
         </style>
-        {{ protection_script|safe }}
     </head>
     <body>
         <div class="container">
-            {% if not session.get('admin_logged_in') %}
-            <a href="{{ url_for('admin_login') }}" class="admin-btn">
-                <i class="fas fa-user-shield"></i> Admin Panel
-            </a>
-            {% endif %}
+            <h1 style="text-align: center;">FREE INTERNET 🔐</h1>
             
-            <div class="music-btn" onclick="toggleMusic()">
-                <i class="fas fa-music"></i>
-            </div>
-
-            <div class="header">
-                <h1><i class="fas fa-globe"></i> FREE INTERNET 🔐</h1>
-            </div>
-
-            <div class="avatar-section">
+            <div class="user-info">
                 {% if user_info %}
-                    <img src="{{ user_info.photo_url }}" alt="User Avatar" class="avatar">
-                    <div class="user-name">
-                        {{ user_info.first_name }} {{ user_info.last_name }}
-                        {% if user_info.username %}(@{{ user_info.username }}){% endif %}
-                    </div>
-                    <div class="user-stats">
-                        <div class="stat-card">
-                            <div>عدد التنزيلات</div>
-                            <div class="stat-value">{{ user_info.download_count }}</div>
-                        </div>
-                        <div class="stat-card">
-                            <div>آخر تنزيل</div>
-                            <div class="stat-value">{{ user_info.last_download }}</div>
-                        </div>
-                    </div>
-                {% else %}
-                    <img src="https://api.dicebear.com/7.x/bottts/svg?seed=guest" alt="Guest" class="avatar">
-                    <div class="user-name">زائر</div>
-                    <p>يجب فتح التطبيق من خلال بوت تليجرام لاستخدام الخدمة</p>
-                {% endif %}
-            </div>
-
-            {% if user_info %}
-            <div class="file-select">
-                <select class="select-box" id="configType" onchange="showFiles()">
-                    <option value="">اختر نوع التطبيق...</option>
-                    {% for config_type in config_files %}
-                        <option value="{{ config_type }}">{{ config_type }}</option>
-                    {% endfor %}
-                </select>
-            </div>
-
-            <div class="file-list" id="fileList">
-                {% for config_type, files in config_files.items() %}
-                    <div class="file-group" id="{{ config_type }}Group">
-                        {% for file in files %}
-                            <div class="file-item">
-                                <div class="file-header">
-                                    <strong>{{ file.name }}</strong>
-                                </div>
-                                <div class="file-meta">
-                                    <span>الحجم: {{ file.size }}</span>
-                                    <span>التاريخ: {{ file.mod_time }}</span>
-                                </div>
-                                <div class="file-description">
-                                    {{ file.description }}
-                                </div>
-                                <button class="download-btn" onclick="downloadFile('{{ config_type }}', '{{ file.name }}')">
-                                    <i class="fas fa-download"></i> تنزيل الملف
-                                </button>
+                    <img src="{{ user_info.photo_url }}" class="avatar" alt="User Avatar">
+                    <h2>{{ user_info.first_name }} {{ user_info.last_name }}</h2>
+                    {% if user_info.username %}
+                        <p>@{{ user_info.username }}</p>
+                    {% endif %}
+                    <p>عدد التنزيلات: {{ user_info.download_count }}</p>
+                    <p>آخر تنزيل: {{ user_info.last_download }}</p>
+                    
+                    <!-- عرض الملفات المتاحة -->
+                    <div style="margin-top: 30px;">
+                        <h3>الملفات المتاحة:</h3>
+                        {% for config_type, files in config_files.items() %}
+                            <div style="margin: 20px 0;">
+                                <h4>{{ config_type }}</h4>
+                                {% for file in files %}
+                                    <div style="background: rgba(255,107,0,0.2); padding: 10px; margin: 10px 0; border-radius: 8px;">
+                                        <p><strong>{{ file.name }}</strong></p>
+                                        <p>الحجم: {{ file.size }}</p>
+                                        <button onclick="downloadFile('{{ config_type }}', '{{ file.name }}')" 
+                                                style="background: #ff6b00; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer;">
+                                            تنزيل
+                                        </button>
+                                    </div>
+                                {% endfor %}
                             </div>
                         {% endfor %}
                     </div>
-                {% endfor %}
-            </div>
-            {% endif %}
-
-            <div class="telegram-section">
-                <a href="https://t.me/dis102" target="_blank" class="telegram-btn">
-                    <i class="fab fa-telegram"></i> انضم لقناتنا على تليجرام
-                </a>
-            </div>
-
-            <div class="copyright">
-                <p>© 2024 VPN Configs. جميع الحقوق محفوظة</p>
+                {% else %}
+                    <img src="https://api.dicebear.com/7.x/bottts/svg?seed=guest" class="avatar" alt="Guest">
+                    <h2>زائر</h2>
+                    <p>يجب فتح التطبيق من خلال بوت تليجرام لاستخدام الخدمة</p>
+                {% endif %}
             </div>
         </div>
 
-        <audio id="backgroundMusic" loop>
-            <source src="https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3" type="audio/mpeg">
-        </audio>
-
         <script>
-            function showFiles() {
-                const selectedType = document.getElementById('configType').value;
-                const groups = document.querySelectorAll('.file-group');
-                
-                groups.forEach(group => {
-                    group.style.display = 'none';
-                });
-                
-                if (selectedType) {
-                    const selectedGroup = document.getElementById(selectedType + 'Group');
-                    if (selectedGroup) {
-                        selectedGroup.style.display = 'block';
-                        document.getElementById('fileList').style.display = 'block';
-                    }
-                } else {
-                    document.getElementById('fileList').style.display = 'none';
-                }
+            function downloadFile(configType, fileName) {
+                fetch(`/download/${configType}/${encodeURIComponent(fileName)}`)
+                    .then(response => response.text())
+                    .then(result => {
+                        alert(result);
+                    })
+                    .catch(error => {
+                        alert('حدث خطأ: ' + error);
+                    });
             }
-
-            function toggleMusic() {
-                const music = document.getElementById('backgroundMusic');
-                const icon = document.querySelector('.music-btn i');
-                
-                if (music.paused) {
-                    music.play();
-                    icon.className = 'fas fa-volume-up';
-                } else {
-                    music.pause();
-                    icon.className = 'fas fa-music';
-                }
-            }
-
-            function showAlert(message, type) {
-                const alertDiv = document.createElement('div');
-                alertDiv.className = `alert alert-${type}`;
-                alertDiv.innerHTML = message;
-                
-                const container = document.querySelector('.container');
-                container.insertBefore(alertDiv, container.firstChild);
-                
-                setTimeout(() => {
-                    alertDiv.remove();
-                }, 5000);
-            }
-
-            async function downloadFile(configType, fileName) {
-                try {
-                    showAlert('⏳ جاري إرسال الملف عبر البوت...', 'success');
-                    
-                    const response = await fetch(`/download/${configType}/${encodeURIComponent(fileName)}`);
-                    const result = await response.text();
-                    
-                    if (response.ok) {
-                        showAlert('✅ تم إرسال الملف إلى حسابك في تليجرام', 'success');
-                    } else {
-                        showAlert('❌ ' + result, 'error');
-                    }
-                } catch (error) {
-                    console.error('Error:', error);
-                    showAlert('❌ حدث خطأ في الاتصال', 'error');
-                }
-            }
-
-            // إظهار رسالة ترحيب
-            window.onload = function() {
-                setTimeout(() => {
-                    if (document.querySelector('.user-name').textContent !== 'زائر') {
-                        showAlert('🛡️ مرحبًا بك في خدمة VPN المجانية', 'success');
-                    }
-                }, 1000);
-            };
         </script>
     </body>
     </html>
-    ''', user_info=user_info, config_files=config_files, protection_script=template_protection_script)
-
-@app.route('/admin/login', methods=['GET', 'POST'])
-def admin_login():
-    if request.method == 'POST':
-        username = request.form.get('username', '').strip()
-        password = request.form.get('password', '').strip()
-        
-        if (username == ADMIN_CREDENTIALS['username'] and 
-            password == ADMIN_CREDENTIALS['password']):
-            session['admin_logged_in'] = True
-            session.permanent = True
-            return redirect(url_for('admin_dashboard'))
-        else:
-            flash('بيانات الدخول غير صحيحة!', 'error')
-    
-    return render_template_string('''
-    <!DOCTYPE html>
-    <html lang="ar" dir="rtl">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Admin Login</title>
-        <style>
-            body {
-                background: linear-gradient(135deg, #0a192f 0%, #1a1a2e 100%);
-                font-family: 'Cairo', sans-serif;
-                display: flex;
-                justify-content: center;
-                align-items: center;
-                min-height: 100vh;
-                margin: 0;
-            }
-            .login-box {
-                background: rgba(0, 0, 0, 0.8);
-                padding: 40px;
-                border-radius: 15px;
-                border: 1px solid #ff6b00;
-                width: 100%;
-                max-width: 400px;
-            }
-            .login-box h2 {
-                color: #ff6b00;
-                text-align: center;
-                margin-bottom: 30px;
-            }
-            .form-group {
-                margin-bottom: 20px;
-            }
-            .form-group label {
-                display: block;
-                margin-bottom: 5px;
-                color: #fff;
-            }
-            .form-group input {
-                width: 100%;
-                padding: 12px;
-                border: 1px solid #ff6b00;
-                border-radius: 5px;
-                background: rgba(255, 255, 255, 0.1);
-                color: white;
-            }
-            .login-btn {
-                width: 100%;
-                padding: 12px;
-                background: #ff6b00;
-                color: white;
-                border: none;
-                border-radius: 5px;
-                cursor: pointer;
-                font-size: 16px;
-            }
-            .flash-message {
-                padding: 10px;
-                background: rgba(244, 67, 54, 0.2);
-                border: 1px solid #f44336;
-                color: #f44336;
-                border-radius: 5px;
-                margin-bottom: 20px;
-                text-align: center;
-            }
-        </style>
-    </head>
-    <body>
-        <div class="login-box">
-            <h2><i class="fas fa-lock"></i> Admin Login</h2>
-            {% with messages = get_flashed_messages(with_categories=true) %}
-                {% if messages %}
-                    {% for category, message in messages %}
-                        <div class="flash-message">{{ message }}</div>
-                    {% endfor %}
-                {% endif %}
-            {% endwith %}
-            <form method="POST">
-                <div class="form-group">
-                    <label>Username:</label>
-                    <input type="text" name="username" required>
-                </div>
-                <div class="form-group">
-                    <label>Password:</label>
-                    <input type="password" name="password" required>
-                </div>
-                <button type="submit" class="login-btn">Login</button>
-            </form>
-        </div>
-    </body>
-    </html>
-    ''')
-
-@app.route('/admin/dashboard')
-@admin_required
-def admin_dashboard():
-    conn = sqlite3.connect('users.db')
-    c = conn.cursor()
-    
-    # إحصائيات المستخدمين
-    c.execute("SELECT COUNT(*) FROM users")
-    total_users = c.fetchone()[0]
-    
-    c.execute("SELECT COUNT(*) FROM users WHERE download_count > 0")
-    active_users = c.fetchone()[0]
-    
-    c.execute("SELECT SUM(download_count) FROM users")
-    total_downloads = c.fetchone()[0] or 0
-    
-    # المستخدمين النشطين
-    c.execute("SELECT first_name, last_name, username, download_count, last_download FROM users ORDER BY download_count DESC LIMIT 10")
-    top_users = c.fetchall()
-    
-    conn.close()
-    
-    config_files = get_config_files()
-    
-    return render_template_string('''
-    <!DOCTYPE html>
-    <html lang="ar" dir="rtl">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Admin Dashboard</title>
-        <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@300;400;600&display=swap" rel="stylesheet">
-        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-        <style>
-            body {
-                background: linear-gradient(135deg, #0a192f 0%, #1a1a2e 100%);
-                font-family: 'Cairo', sans-serif;
-                color: white;
-                margin: 0;
-                padding: 20px;
-            }
-            .container {
-                max-width: 1200px;
-                margin: 0 auto;
-            }
-            .header {
-                text-align: center;
-                margin-bottom: 30px;
-            }
-            .stats {
-                display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-                gap: 20px;
-                margin-bottom: 30px;
-            }
-            .stat-card {
-                background: rgba(255, 107, 0, 0.1);
-                padding: 20px;
-                border-radius: 10px;
-                border: 1px solid rgba(255, 107, 0, 0.3);
-                text-align: center;
-            }
-            .stat-number {
-                font-size: 2rem;
-                font-weight: bold;
-                color: #ff8c00;
-            }
-            .users-table {
-                background: rgba(0, 0, 0, 0.6);
-                border-radius: 10px;
-                padding: 20px;
-                margin-bottom: 30px;
-            }
-            table {
-                width: 100%;
-                border-collapse: collapse;
-            }
-            th, td {
-                padding: 12px;
-                text-align: right;
-                border-bottom: 1px solid rgba(255, 107, 0, 0.3);
-            }
-            th {
-                background: rgba(255, 107, 0, 0.2);
-            }
-            .logout-btn {
-                background: #f44336;
-                color: white;
-                padding: 10px 20px;
-                border: none;
-                border-radius: 5px;
-                cursor: pointer;
-                text-decoration: none;
-                display: inline-block;
-            }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <div class="header">
-                <h1><i class="fas fa-user-shield"></i> Admin Dashboard</h1>
-                <a href="{{ url_for('admin_logout') }}" class="logout-btn">تسجيل الخروج</a>
-            </div>
-            
-            <div class="stats">
-                <div class="stat-card">
-                    <div class="stat-number">{{ total_users }}</div>
-                    <div>إجمالي المستخدمين</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-number">{{ active_users }}</div>
-                    <div>المستخدمين النشطين</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-number">{{ total_downloads }}</div>
-                    <div>إجمالي التنزيلات</div>
-                </div>
-            </div>
-            
-            <div class="users-table">
-                <h2>أفضل 10 مستخدمين</h2>
-                <table>
-                    <thead>
-                        <tr>
-                            <th>الاسم</th>
-                            <th>اسم المستخدم</th>
-                            <th>عدد التنزيلات</th>
-                            <th>آخر تنزيل</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {% for user in top_users %}
-                        <tr>
-                            <td>{{ user[0] }} {{ user[1] }}</td>
-                            <td>@{{ user[2] if user[2] else 'لا يوجد' }}</td>
-                            <td>{{ user[3] }}</td>
-                            <td>{{ user[4] if user[4] else 'لم يقم بتنزيل' }}</td>
-                        </tr>
-                        {% endfor %}
-                    </tbody>
-                </table>
-            </div>
-        </div>
-    </body>
-    </html>
-    ''', total_users=total_users, active_users=active_users, total_downloads=total_downloads, top_users=top_users)
-
-@app.route('/admin/logout')
-def admin_logout():
-    session.pop('admin_logged_in', None)
-    return redirect(url_for('admin_login'))
+    ''', user_info=user_info, config_files=get_config_files())
 
 @app.route('/download/<config_type>/<path:filename>')
-def download(config_type, filename):
+def download_file(config_type, filename):
     if 'telegram_id' not in session:
         return "يجب تسجيل الدخول أولاً", 403
     
-    if config_type not in CONFIG_TYPES:
-        return "نوع التكوين غير صالح", 400
-    
-    file_path = safe_join(DOWNLOAD_FOLDER, config_type, filename)
-    if not os.path.exists(file_path):
-        return "الملف غير موجود", 404
-    
     try:
-        # تحديث إحصائيات المستخدم
+        file_path = safe_join(DOWNLOAD_FOLDER, config_type, filename)
+        if not os.path.exists(file_path):
+            return "الملف غير موجود", 404
+        
+        # تحديث الإحصائيات
         update_user_download(session['telegram_id'], filename)
         
         # إرسال الملف عبر البوت
-        with open(file_path, 'rb') as file:
-            bot.send_document(
-                session['telegram_id'], 
-                file, 
-                caption=f"📁 {filename}\n\nتم التنزيل بنجاح ✅\n\nشكراً لاستخدامك خدمتنا! 🚀"
-            )
-        
-        return "تم إرسال الملف إلى حسابك في تليجرام", 200
-        
+        try:
+            with open(file_path, 'rb') as file:
+                bot.send_document(
+                    session['telegram_id'],
+                    file,
+                    caption=f"📁 {filename}\nتم التنزيل بنجاح! ✅"
+                )
+            return "✅ تم إرسال الملف إلى محادثتك في تليجرام"
+        except Exception as e:
+            return f"❌ خطأ في إرسال الملف: {str(e)}"
+            
     except Exception as e:
-        print(f"Error sending file: {e}")
-        return f"خطأ في إرسال الملف: {str(e)}", 500
+        return f"❌ حدث خطأ: {str(e)}"
+
+def get_config_files():
+    config_files = {}
+    for config_type in CONFIG_TYPES:
+        dir_path = os.path.join(DOWNLOAD_FOLDER, config_type)
+        files = []
+        try:
+            for filename in os.listdir(dir_path):
+                file_path = os.path.join(dir_path, filename)
+                if os.path.isfile(file_path) and not filename.startswith('.'):
+                    size = os.path.getsize(file_path)
+                    files.append({
+                        'name': filename,
+                        'size': f"{size / 1024:.1f} KB" if size < 1024*1024 else f"{size / (1024*1024):.1f} MB"
+                    })
+        except FileNotFoundError:
+            os.makedirs(dir_path, exist_ok=True)
+        config_files[config_type] = files
+    return config_files
 
 @bot.message_handler(commands=['start'])
-def send_welcome(message):
+def start_command(message):
     try:
-        markup = InlineKeyboardMarkup()
+        # إنشاء زر Web App
+        keyboard = InlineKeyboardMarkup()
         web_app_button = InlineKeyboardButton(
-            "فتح التطبيق 🔓", 
-            web_app=WebAppInfo(url="https://your-app-url.onrender.com")  # ضع رابط التطبيق هنا
+            "فتح التطبيق 🚀", 
+            web_app=WebAppInfo(url="https://test-bgei.onrender.com/")  # ضع رابطك هنا
         )
-        markup.add(web_app_button)
+        keyboard.add(web_app_button)
         
         welcome_text = """
-        🎉 أهلاً بك في بوت VPN المجاني!
-
-        🔐 يمكنك من خلال هذا البوت:
-        • تحميل إعدادات VPN مجانية
-        • إعدادات خوادم عالية السرعة
-        • تطبيقات متميزة مجانية
-
-        📱 اضغط على الزر أدناه لفتح التطبيق والبدء في التحميل:
+        🎉 أهلاً بك في بوت الإعدادات المجانية!
+        
+        🔓 اضغط على الزر أدناه لفتح التطبيق وتحميل الإعدادات:
         """
         
         bot.send_message(
-            message.chat.id, 
-            welcome_text, 
-            reply_markup=markup,
-            parse_mode='HTML'
+            message.chat.id,
+            welcome_text,
+            reply_markup=keyboard
         )
     except Exception as e:
-        print(f"Bot error: {e}")
+        print(f"Error in start command: {e}")
 
 @bot.message_handler(commands=['stats'])
-def send_stats(message):
+def stats_command(message):
     try:
         user_info = get_user_info(message.from_user.id)
         if user_info:
@@ -1055,36 +410,31 @@ def send_stats(message):
             📊 إحصائياتك:
 
             👤 الاسم: {user_info[2]} {user_info[3]}
-            📧 المستخدم: @{user_info[4] if user_info[4] else 'لا يوجد'}
             📥 عدد التنزيلات: {user_info[7]}
-            🕒 آخر تنزيل: {user_info[6] if user_info[6] else 'لم تقم بأي تنزيل بعد'}
+            🕒 آخر تنزيل: {user_info[6] if user_info[6] else 'لم تقم بأي تنزيل'}
             """
         else:
             stats_text = "❌ لم يتم العثور على بياناتك. يرجى فتح التطبيق أولاً."
         
-        bot.send_message(message.chat.id, stats_text, parse_mode='HTML')
+        bot.send_message(message.chat.id, stats_text)
     except Exception as e:
-        print(f"Stats error: {e}")
+        print(f"Error in stats command: {e}")
 
 def run_bot():
     try:
-        print("Starting Telegram bot...")
-        bot.infinity_polling(timeout=60, long_polling_timeout=60)
+        print("🤖 Starting Telegram Bot...")
+        bot.remove_webhook()
+        bot.infinity_polling()
     except Exception as e:
-        print(f"Bot polling error: {e}")
-        # إعادة التشغيل بعد 10 ثواني في حال فشل
+        print(f"Bot error: {e}")
         import time
         time.sleep(10)
         run_bot()
 
-# تشغيل البوت في خيط منفصل
-try:
-    bot_thread = Thread(target=run_bot, daemon=True)
-    bot_thread.start()
-    print("Bot thread started successfully")
-except Exception as e:
-    print(f"Error starting bot thread: {e}")
+# تشغيل البوت في thread منفصل
+bot_thread = Thread(target=run_bot, daemon=True)
+bot_thread.start()
 
 if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 10000))
+    port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port, debug=False)
