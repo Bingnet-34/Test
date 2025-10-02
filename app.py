@@ -2,14 +2,11 @@ import os
 import secrets
 import sqlite3
 import json
-import hashlib
-import hmac
 from datetime import datetime
 from functools import wraps
 from threading import Thread
-from urllib.parse import parse_qs
 
-from flask import Flask, render_template_string, request, redirect, url_for, session, flash
+from flask import Flask, render_template_string, request, redirect, url_for, session, jsonify
 from werkzeug.utils import safe_join
 import telebot
 from telebot.types import WebAppInfo, InlineKeyboardMarkup, InlineKeyboardButton
@@ -25,66 +22,10 @@ bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DOWNLOAD_FOLDER = os.path.join(BASE_DIR, 'configs')
 CONFIG_TYPES = ['HTTP_CUSTOM', 'Dark_Tunnel', 'HTTP_INJECTOR', 'تطبيقات معدلة🔥+حسابات مدفوعة']
-ADMIN_CREDENTIALS = {'username': 'admin', 'password': 'admink123'}
 
 # إنشاء مجلدات التكوينات
 for config_type in CONFIG_TYPES:
     os.makedirs(os.path.join(DOWNLOAD_FOLDER, config_type), exist_ok=True)
-
-# دالة مبسطة للتحقق - نعتمد على أن البيانات تأتي من تليجرام مباشرة
-def verify_telegram_webapp(init_data):
-    """
-    دالة مبسطة للتحقق - في بيئة الإنتاج الحقيقية، يجب استخدام التحقق الكامل
-    """
-    try:
-        if not init_data:
-            return False
-            
-        parsed_data = parse_qs(init_data)
-        
-        # تحقق بسيط من وجود البيانات الأساسية
-        user_str = parsed_data.get('user', [''])[0]
-        auth_date = parsed_data.get('auth_date', [''])[0]
-        
-        if not user_str or not auth_date:
-            return False
-            
-        # تحقق من أن auth_date حديث (أقل من 24 ساعة)
-        auth_timestamp = int(auth_date)
-        current_timestamp = int(datetime.now().timestamp())
-        
-        if current_timestamp - auth_timestamp > 86400:  # 24 ساعة
-            return False
-            
-        return True
-        
-    except Exception as e:
-        print(f"Verification error: {e}")
-        return False
-
-# استخراج بيانات المستخدم
-def extract_telegram_user(init_data):
-    try:
-        parsed_data = parse_qs(init_data)
-        user_str = parsed_data.get('user', [''])[0]
-        
-        if user_str:
-            user_data = json.loads(user_str)
-            telegram_id = user_data.get('id')
-            
-            if telegram_id:
-                return {
-                    'id': telegram_id,
-                    'first_name': user_data.get('first_name', ''),
-                    'last_name': user_data.get('last_name', ''),
-                    'username': user_data.get('username', ''),
-                    'language_code': user_data.get('language_code', 'ar'),
-                    'photo_url': f"https://api.dicebear.com/7.x/bottts/svg?seed={telegram_id}"
-                }
-    except Exception as e:
-        print(f"Error extracting user: {e}")
-    
-    return None
 
 # إنشاء قاعدة البيانات
 def init_db():
@@ -117,26 +58,23 @@ def save_user_info(user_data):
     conn = sqlite3.connect('users.db', check_same_thread=False)
     c = conn.cursor()
     
-    # تحقق إذا كان المستخدم موجوداً
     c.execute("SELECT * FROM users WHERE telegram_id=?", (user_data['id'],))
     existing_user = c.fetchone()
     
     if existing_user:
-        # تحديث البيانات
         c.execute('''UPDATE users SET 
-                     first_name=?, last_name=?, username=?, photo_url=?
+                     first_name=?, last_name=?, username=?
                      WHERE telegram_id=?''',
                  (user_data['first_name'], user_data['last_name'], 
-                  user_data['username'], user_data['photo_url'], 
-                  user_data['id']))
+                  user_data['username'], user_data['id']))
     else:
-        # إضافة مستخدم جديد
+        photo_url = f"https://api.dicebear.com/7.x/bottts/svg?seed={user_data['id']}"
         c.execute('''INSERT INTO users 
                      (telegram_id, first_name, last_name, username, photo_url, download_count) 
                      VALUES (?, ?, ?, ?, ?, ?)''',
                  (user_data['id'], user_data['first_name'], 
                   user_data['last_name'], user_data['username'], 
-                  user_data['photo_url'], 0))
+                  photo_url, 0))
     
     conn.commit()
     conn.close()
@@ -162,20 +100,9 @@ def get_config_files():
                 file_path = os.path.join(dir_path, filename)
                 if os.path.isfile(file_path) and not filename.startswith('.'):
                     size = os.path.getsize(file_path)
-                    # قراءة الوصف إذا موجود
-                    desc_path = os.path.join(dir_path, f"{filename}.desc")
-                    description = "لا يوجد وصف متاح"
-                    if os.path.exists(desc_path):
-                        try:
-                            with open(desc_path, 'r', encoding='utf-8') as f:
-                                description = f.read().strip()
-                        except:
-                            pass
-                    
                     files.append({
                         'name': filename,
-                        'size': f"{size / 1024:.1f} KB" if size < 1024*1024 else f"{size / (1024*1024):.1f} MB",
-                        'description': description
+                        'size': f"{size / 1024:.1f} KB" if size < 1024*1024 else f"{size / (1024*1024):.1f} MB"
                     })
         except FileNotFoundError:
             os.makedirs(dir_path, exist_ok=True)
@@ -184,54 +111,125 @@ def get_config_files():
 
 @app.route('/')
 def index():
+    # نعتمد على أن Telegram WebApp سيقوم بإرسال بيانات المستخدم عبر JavaScript
+    return render_template_string('''
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FREE INTERNET 🔐</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <style>
+        body {
+            background: linear-gradient(135deg, #0a192f 0%, #1a1a2e 100%);
+            color: white;
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            text-align: center;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: rgba(0,0,0,0.8);
+            padding: 20px;
+            border-radius: 15px;
+        }
+        .loading {
+            font-size: 1.2rem;
+            margin: 50px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="loading">
+            ⏳ جاري التحميل والتحقق من الهوية...
+        </div>
+    </div>
+
+    <script>
+        // انتظر حتى يتم تهيئة Telegram WebApp
+        Telegram.WebApp.ready();
+
+        // احصل على بيانات المستخدم من Telegram WebApp
+        const user = Telegram.WebApp.initDataUnsafe.user;
+
+        if (user) {
+            console.log('User data:', user);
+            
+            // أرسل بيانات المستخدم إلى الخادم
+            fetch('/auth', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    id: user.id,
+                    first_name: user.first_name,
+                    last_name: user.last_name || '',
+                    username: user.username || ''
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    // إعادة التوجيه إلى الصفحة الرئيسية مع بيانات الجلسة
+                    window.location.href = '/main';
+                } else {
+                    document.querySelector('.container').innerHTML = `
+                        <h1>❌ خطأ في المصادقة</h1>
+                        <p>${data.error || 'حدث خطأ غير معروف'}</p>
+                    `;
+                }
+            })
+            .catch(error => {
+                document.querySelector('.container').innerHTML = `
+                    <h1>❌ خطأ في الاتصال</h1>
+                    <p>${error}</p>
+                `;
+            });
+        } else {
+            document.querySelector('.container').innerHTML = `
+                <h1>❌ لم يتم العثور على بيانات المستخدم</h1>
+                <p>يجب فتح التطبيق من خلال بوت تليجرام</p>
+                <p>إذا كنت تستخدم المتصفح العادي، هذا التطبيق لن يعمل بشكل صحيح</p>
+            `;
+        }
+    </script>
+</body>
+</html>
+    ''')
+
+@app.route('/auth', methods=['POST'])
+def auth():
+    try:
+        user_data = request.get_json()
+        
+        if not user_data or 'id' not in user_data:
+            return jsonify({'success': False, 'error': 'بيانات غير صالحة'})
+        
+        # حفظ في الجلسة
+        session['telegram_id'] = user_data['id']
+        session['first_name'] = user_data['first_name']
+        session['last_name'] = user_data.get('last_name', '')
+        session['username'] = user_data.get('username', '')
+        session['photo_url'] = f"https://api.dicebear.com/7.x/bottts/svg?seed={user_data['id']}"
+        
+        # حفظ في قاعدة البيانات
+        save_user_info(user_data)
+        
+        return jsonify({'success': True})
+        
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/main')
+def main():
     user_info = None
     
-    # محاولة الحصول على بيانات التليجرام من معامل URL
-    init_data = request.args.get('tgWebAppData', '')
-    
-    # إذا لم تكن في المعامل، حاول الحصول من الهاش (#)
-    if not init_data and request.args.get('hash'):
-        init_data = request.url.split('#')[-1] if '#' in request.url else ''
-    
-    print(f"Init data received: {init_data[:100]}...")  # طباعة جزء من البيانات للتdebug
-    
-    if init_data:
-        # التحقق من البيانات واستخراج معلومات المستخدم
-        if verify_telegram_webapp(init_data):
-            user_data = extract_telegram_user(init_data)
-            
-            if user_data:
-                print(f"User authenticated: {user_data['first_name']} (ID: {user_data['id']})")
-                
-                # حفظ في الجلسة
-                session['telegram_id'] = user_data['id']
-                session['first_name'] = user_data['first_name']
-                session['last_name'] = user_data.get('last_name', '')
-                session['username'] = user_data.get('username', '')
-                session['photo_url'] = user_data['photo_url']
-                session.permanent = True
-                
-                # حفظ في قاعدة البيانات
-                save_user_info(user_data)
-                
-                # الحصول على معلومات إضافية من قاعدة البيانات
-                user_db_info = get_user_info(user_data['id'])
-                if user_db_info:
-                    last_download = user_db_info[6] if user_db_info[6] else 'لم يقم بتنزيل'
-                    download_count = user_db_info[7] if user_db_info[7] else 0
-                    
-                    user_info = {
-                        'id': user_data['id'],
-                        'first_name': user_data['first_name'],
-                        'last_name': user_data.get('last_name', ''),
-                        'username': user_data.get('username', ''),
-                        'photo_url': user_data['photo_url'],
-                        'last_download': last_download,
-                        'download_count': download_count
-                    }
-
-    # إذا لم يتم التحقق من التليجرام، تحقق من الجلسة
-    if not user_info and session.get('telegram_id'):
+    if session.get('telegram_id'):
         user_db_info = get_user_info(session['telegram_id'])
         if user_db_info:
             last_download = user_db_info[6] if user_db_info[6] else 'لم يقم بتنزيل'
@@ -246,7 +244,10 @@ def index():
                 'last_download': last_download,
                 'download_count': download_count
             }
-
+    
+    if not user_info:
+        return redirect('/')
+    
     config_files = get_config_files()
     
     return render_template_string('''
@@ -343,13 +344,6 @@ def index():
             font-weight: bold;
             margin-bottom: 5px;
         }
-        .file-desc {
-            background: rgba(76, 175, 80, 0.1);
-            padding: 10px;
-            border-radius: 5px;
-            margin: 10px 0;
-            border-left: 3px solid #4CAF50;
-        }
         .download-btn {
             background: linear-gradient(45deg, #ff6b00, #ff8c00);
             color: white;
@@ -361,13 +355,6 @@ def index():
             font-size: 1rem;
             margin-top: 10px;
         }
-        .guest-message {
-            text-align: center;
-            padding: 40px;
-            background: rgba(255, 0, 0, 0.1);
-            border-radius: 10px;
-            border: 1px solid rgba(255, 0, 0, 0.3);
-        }
     </style>
 </head>
 <body>
@@ -378,45 +365,30 @@ def index():
         </div>
 
         <div class="user-section">
-            {% if user_info %}
-                <img src="{{ user_info.photo_url }}" alt="Avatar" class="avatar">
-                <div class="user-name">
-                    {{ user_info.first_name }} {{ user_info.last_name }}
-                    {% if user_info.username %}
-                        <br><small>@{{ user_info.username }}</small>
-                    {% endif %}
-                </div>
-                
-                <div class="stats">
-                    <div class="stat-card">
-                        <div>عدد التنزيلات</div>
-                        <div style="font-size: 1.5rem; font-weight: bold; color: #ff8c00;">
-                            {{ user_info.download_count }}
-                        </div>
-                    </div>
-                    <div class="stat-card">
-                        <div>آخر تنزيل</div>
-                        <div style="font-size: 1.1rem; color: #ff8c00;">
-                            {{ user_info.last_download }}
-                        </div>
+            <img src="{{ user_info.photo_url }}" alt="Avatar" class="avatar">
+            <div class="user-name">
+                {{ user_info.first_name }} {{ user_info.last_name }}
+                {% if user_info.username %}
+                    <br><small>@{{ user_info.username }}</small>
+                {% endif %}
+            </div>
+            
+            <div class="stats">
+                <div class="stat-card">
+                    <div>عدد التنزيلات</div>
+                    <div style="font-size: 1.5rem; font-weight: bold; color: #ff8c00;">
+                        {{ user_info.download_count }}
                     </div>
                 </div>
-            {% else %}
-                <img src="https://api.dicebear.com/7.x/bottts/svg?seed=guest" alt="Guest" class="avatar">
-                <div class="user-name">زائر</div>
-                <div class="guest-message">
-                    <h3>⚠️ يجب فتح التطبيق من خلال بوت تليجرام</h3>
-                    <p>للاستفادة من الخدمة، يرجى:</p>
-                    <ol style="text-align: right; margin: 15px 0;">
-                        <li>فتح بوت تليجرام الخاص بنا</li>
-                        <li>النقر على زر "فتح التطبيق"</li>
-                        <li>سيتم التعرف عليك تلقائياً</li>
-                    </ol>
+                <div class="stat-card">
+                    <div>آخر تنزيل</div>
+                    <div style="font-size: 1.1rem; color: #ff8c00;">
+                        {{ user_info.last_download }}
+                    </div>
                 </div>
-            {% endif %}
+            </div>
         </div>
 
-        {% if user_info %}
         <div class="file-section">
             <h2 style="text-align: center; margin-bottom: 30px; color: var(--primary);">
                 📁 الملفات المتاحة للتحميل
@@ -432,11 +404,6 @@ def index():
                         <div style="color: #ccc; font-size: 0.9rem; margin: 5px 0;">
                             الحجم: {{ file.size }}
                         </div>
-                        {% if file.description != "لا يوجد وصف متاح" %}
-                        <div class="file-desc">
-                            {{ file.description }}
-                        </div>
-                        {% endif %}
                         <button class="download-btn" onclick="downloadFile('{{ config_type }}', '{{ file.name }}')">
                             ⬇️ تنزيل الملف
                         </button>
@@ -450,7 +417,6 @@ def index():
             </div>
             {% endfor %}
         </div>
-        {% endif %}
     </div>
 
     <script>
@@ -476,11 +442,9 @@ def index():
         }
 
         // إظهار رسالة ترحيب
-        {% if user_info %}
         setTimeout(() => {
             alert('🎉 أهلاً بك {{ user_info.first_name }}!\\n\\nيمكنك الآن تحميل الإعدادات المجانية');
         }, 1000);
-        {% endif %}
     </script>
 </body>
 </html>
@@ -523,8 +487,8 @@ def start_command(message):
         # إنشاء زر Web App
         keyboard = InlineKeyboardMarkup()
         
-        # استخدم رابط التطبيق الحقيقي هنا
-        web_app_url = "https://test-bgei.onrender.com/"  # غير هذا بالرابط الحقيقي
+        # استخدم رابط التطبيق الحقيقي هنا - تأكد من تغييره!
+        web_app_url = "https://test-bgei.onrender.com/"  # ⚠️ غير هذا بالرابط الحقيقي
         
         web_app_button = InlineKeyboardButton(
             "🚀 فتح التطبيق", 
