@@ -5,7 +5,7 @@ import json
 from datetime import datetime
 from functools import wraps
 from threading import Thread
-from urllib.parse import quote
+from urllib.parse import parse_qs
 
 from flask import Flask, render_template_string, send_from_directory, request, redirect, url_for, session, flash, jsonify
 from werkzeug.utils import secure_filename, safe_join
@@ -89,8 +89,7 @@ def save_user_info(user_data):
                      first_name=?, last_name=?, username=?, photo_url=?
                      WHERE telegram_id=?''',
                  (user_data['first_name'], user_data['last_name'], 
-                  user_data['username'], user_data.get('photo_url', ''), 
-                  user_data['id']))
+                  user_data['username'], user_data.get('photo_url', ''), user_data['id']))
     else:
         photo_url = user_data.get('photo_url', f"https://api.dicebear.com/7.x/bottts/svg?seed={user_data['id']}")
         c.execute('''INSERT INTO users 
@@ -150,6 +149,28 @@ template_protection_script = """
 </script>
 """
 
+def show_notification(message, type='success'):
+    return f"""
+    <div class="notification notification-{type}" id="notification">
+        <div class="notification-content">
+            <i class="fas fa-{ 'check-circle' if type == 'success' else 'exclamation-circle' if type == 'warning' else 'info-circle' if type == 'info' else 'times-circle'}"></i>
+            <span>{message}</span>
+        </div>
+        <button class="notification-close" onclick="closeNotification()">
+            <i class="fas fa-times"></i>
+        </button>
+    </div>
+    <script>
+        function closeNotification() {{
+            document.getElementById('notification').style.display = 'none';
+        }}
+        setTimeout(() => {{
+            const notification = document.getElementById('notification');
+            if (notification) notification.style.display = 'none';
+        }}, 5000);
+    </script>
+    """
+
 @app.route('/')
 def index():
     return render_template_string('''
@@ -164,7 +185,7 @@ def index():
             body {
                 background: linear-gradient(135deg, #0a192f 0%, #1a1a2e 100%);
                 color: white;
-                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                font-family: Arial, sans-serif;
                 margin: 0;
                 padding: 20px;
                 text-align: center;
@@ -174,42 +195,44 @@ def index():
                 min-height: 100vh;
             }
             .container {
-                background: rgba(0,0,0,0.9);
-                padding: 50px 30px;
-                border-radius: 20px;
+                background: rgba(0,0,0,0.8);
+                padding: 40px;
+                border-radius: 15px;
                 max-width: 500px;
-                border: 2px solid #ff6b00;
-                box-shadow: 0 10px 30px rgba(255, 107, 0, 0.3);
+                border: 1px solid #ff6b00;
             }
             .loading {
-                font-size: 1.3rem;
-                margin: 25px 0;
-                color: #ff8c00;
+                font-size: 1.2rem;
+                margin: 20px 0;
             }
             .spinner {
-                border: 5px solid rgba(255, 107, 0, 0.3);
+                border: 4px solid rgba(255, 107, 0, 0.3);
                 border-radius: 50%;
-                border-top: 5px solid #ff6b00;
-                width: 60px;
-                height: 60px;
-                animation: spin 1.5s linear infinite;
+                border-top: 4px solid #ff6b00;
+                width: 40px;
+                height: 40px;
+                animation: spin 1s linear infinite;
                 margin: 0 auto;
-            }
-            .status {
-                margin-top: 20px;
-                padding: 15px;
-                border-radius: 10px;
-                background: rgba(255, 107, 0, 0.1);
-                border: 1px solid rgba(255, 107, 0, 0.3);
             }
             @keyframes spin {
                 0% { transform: rotate(0deg); }
                 100% { transform: rotate(360deg); }
             }
-            h1 {
-                color: #ff6b00;
-                margin-bottom: 30px;
-                font-size: 2.2rem;
+            .btn {
+                background: #ff6b00;
+                color: white;
+                border: none;
+                padding: 12px 25px;
+                border-radius: 8px;
+                text-decoration: none;
+                display: inline-block;
+                margin: 10px;
+                cursor: pointer;
+                transition: all 0.3s ease;
+            }
+            .btn:hover {
+                background: #ff5500;
+                transform: scale(1.05);
             }
         </style>
     </head>
@@ -217,63 +240,67 @@ def index():
         <div class="container">
             <h1>🛡️ FREE INTERNET 🔐</h1>
             <div class="spinner"></div>
-            <div class="loading">🔄 جاري التحميل والتحقق من الهوية...</div>
-            <div class="status" id="status">
-                ⏳ يرجى الانتظار جاري معالجة طلبك...
-            </div>
+            <div class="loading">⏳ جاري التحميل والتحقق من الهوية...</div>
+            <div id="error-message" style="display: none; color: #ff4444; margin: 20px 0;"></div>
+            <a href="/main" class="btn" style="display: none;" id="manual-btn">الدخول يدوياً</a>
         </div>
 
         <script>
             // انتظر حتى يتم تهيئة Telegram WebApp
-            Telegram.WebApp.ready();
-            Telegram.WebApp.expand();
-
-            // تحديث الحالة
-            document.getElementById('status').innerHTML = '✅ تم تحميل Telegram WebApp<br>🔍 جاري استخراج بيانات المستخدم...';
-
-            // احصل على بيانات المستخدم من Telegram WebApp
-            const user = Telegram.WebApp.initDataUnsafe.user;
-
-            if (user) {
-                console.log('User data:', user);
-                document.getElementById('status').innerHTML = '✅ تم العثور على بيانات المستخدم<br>📧 جاري تسجيل الدخول...';
+            if (typeof Telegram !== 'undefined' && Telegram.WebApp) {
+                Telegram.WebApp.ready();
                 
-                // إنشاء بيانات المستخدم مع الصورة الحقيقية إذا كانت متاحة
-                const userData = {
-                    id: user.id,
-                    first_name: user.first_name,
-                    last_name: user.last_name || '',
-                    username: user.username || '',
-                    photo_url: user.photo_url || `https://api.dicebear.com/7.x/avataaars/svg?seed=${user.id}`
-                };
+                // احصل على بيانات المستخدم من Telegram WebApp
+                const user = Telegram.WebApp.initDataUnsafe.user;
 
-                // أرسل بيانات المستخدم إلى الخادم
-                fetch('/auth', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify(userData)
-                })
-                .then(response => response.json())
-                .then(data => {
-                    if (data.success) {
-                        document.getElementById('status').innerHTML = '✅ تم تسجيل الدخول بنجاح<br>🚀 جاري التوجيه...';
-                        setTimeout(() => {
-                            window.location.href = '/main';
-                        }, 1000);
-                    } else {
-                        document.getElementById('status').innerHTML = 
-                            '❌ خطأ في المصادقة<br>' + (data.error || 'حدث خطأ غير معروف');
+                if (user) {
+                    console.log('User data:', user);
+                    
+                    // الحصول على صورة المستخدم إذا كانت متاحة
+                    let photo_url = '';
+                    if (user.photo_url) {
+                        photo_url = user.photo_url;
                     }
-                })
-                .catch(error => {
-                    document.getElementById('status').innerHTML = 
-                        '❌ خطأ في الاتصال<br>' + error;
-                });
+                    
+                    // أرسل بيانات المستخدم إلى الخادم
+                    fetch('/auth', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({
+                            id: user.id,
+                            first_name: user.first_name,
+                            last_name: user.last_name || '',
+                            username: user.username || '',
+                            photo_url: photo_url
+                        })
+                    })
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.success) {
+                            // إعادة التوجيه إلى الصفحة الرئيسية مع بيانات الجلسة
+                            window.location.href = '/main';
+                        } else {
+                            showError(data.error || 'حدث خطأ غير معروف');
+                        }
+                    })
+                    .catch(error => {
+                        showError('خطأ في الاتصال: ' + error.message);
+                    });
+                } else {
+                    showError('لم يتم العثور على بيانات المستخدم. يجب فتح التطبيق من خلال بوت تليجرام');
+                }
             } else {
-                document.getElementById('status').innerHTML = 
-                    '❌ لم يتم العثور على بيانات المستخدم<br>⚠️ يجب فتح التطبيق من خلال بوت تليجرام';
+                showError('بيئة Telegram WebApp غير متاحة. يجب فتح التطبيق من خلال بوت تليجرام');
+            }
+
+            function showError(message) {
+                document.getElementById('error-message').innerHTML = '❌ ' + message;
+                document.getElementById('error-message').style.display = 'block';
+                document.getElementById('manual-btn').style.display = 'inline-block';
+                document.querySelector('.spinner').style.display = 'none';
+                document.querySelector('.loading').style.display = 'none';
             }
         </script>
     </body>
@@ -293,7 +320,7 @@ def auth():
         session['first_name'] = user_data['first_name']
         session['last_name'] = user_data.get('last_name', '')
         session['username'] = user_data.get('username', '')
-        session['photo_url'] = user_data.get('photo_url', f"https://api.dicebear.com/7.x/avataaars/svg?seed={user_data['id']}")
+        session['photo_url'] = user_data.get('photo_url', f"https://api.dicebear.com/7.x/bottts/svg?seed={user_data['id']}")
         session.permanent = True
         
         # حفظ في قاعدة البيانات
@@ -319,7 +346,7 @@ def main():
                 'first_name': session.get('first_name', ''),
                 'last_name': session.get('last_name', ''),
                 'username': session.get('username', ''),
-                'photo_url': session.get('photo_url', f"https://api.dicebear.com/7.x/avataaars/svg?seed={session['telegram_id']}"),
+                'photo_url': session.get('photo_url', 'https://api.dicebear.com/7.x/bottts/svg?seed=unknown'),
                 'last_download': last_download,
                 'download_count': download_count
             }
@@ -329,6 +356,9 @@ def main():
     
     config_files = get_config_files()
     
+    notification = request.args.get('notification')
+    notification_type = request.args.get('type', 'success')
+    
     return render_template_string('''
     <!DOCTYPE html>
     <html lang="ar" dir="rtl">
@@ -337,7 +367,7 @@ def main():
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>FREE INTERNET 🔐</title>
-        <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@300;400;600;700&display=swap" rel="stylesheet">
+        <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@300&display=swap" rel="stylesheet">
         <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
         <meta name="robots" content="noindex,nofollow">
         <style>
@@ -346,485 +376,475 @@ def main():
                 --secondary: #8B4513;
                 --dark: #1a1a1a;
                 --light: #f8f9fa;
-                --success: #28a745;
-                --warning: #ffc107;
-                --danger: #dc3545;
             }
-            
-            * {
-                margin: 0;
-                padding: 0;
-                box-sizing: border-box;
-            }
-            
             body {
                 font-family: 'Cairo', sans-serif;
-                background: linear-gradient(135deg, #0a192f 0%, #1a1a2e 50%, #16213e 100%);
+                background-size: cover;
                 color: white;
+                background-color: #0a192f;
+                margin: 0;
+                padding: 0;
                 min-height: 100vh;
-                padding: 20px;
-                line-height: 1.6;
+                margin-top: 30px;
             }
-            
             .container {
-                max-width: 900px;
-                margin: 0 auto;
-                background: rgba(0, 0, 0, 0.85);
-                border-radius: 20px;
-                padding: 25px;
-                box-shadow: 0 15px 35px rgba(255, 107, 0, 0.25);
-                border: 2px solid rgba(255, 107, 0, 0.4);
-                backdrop-filter: blur(10px);
                 position: relative;
+                flex-direction: column;
+                align-items: center;
+                max-width: 800px;
+                margin: 30px auto;
+                padding: 20px;
+                background: rgba(0, 0, 0, 0.7);
+                border-radius: 15px;
+                border: 1px solid rgba(255, 107, 0, 0.5);
             }
-            
-            .back-btn {
+            .header {
+                font-size: 2.5rem;
+                font-weight: bold;
+                text-align: center;
+                margin-bottom: 20px;
+                color: var(--primary);
+                animation: glow 1.2s ease-in-out infinite alternate;
+            }
+            @keyframes glow {
+                from { text-shadow: 0 0 5px var(--primary); }
+                to { text-shadow: 0 0 15px var(--primary), 0 0 20px var(--primary); }
+            }
+            .user-section {
+                text-align: center;
+                margin: 20px 0;
+            }
+            .avatar-img {
+                width: 120px;
+                height: 120px;
+                border-radius: 50%;
+                border: 3px solid var(--primary);
+                transition: all 0.3s ease;
+                object-fit: cover;
+            }
+            .avatar-name {
+                font-size: 1.5rem;
+                font-weight: bold;
+                margin-top: 10px;
+                color: orange;
+            }
+            .user-stats {
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 15px;
+                margin: 20px 0;
+            }
+            .stat-card {
+                background: rgba(255, 107, 0, 0.1);
+                padding: 15px;
+                border-radius: 10px;
+                border: 1px solid rgba(255, 107, 0, 0.3);
+                text-align: center;
+            }
+            .stat-value {
+                font-size: 1.2rem;
+                font-weight: bold;
+                color: #ff8c00;
+            }
+            .file-select {
+                margin: 20px 0;
+                width: 100%;
+            }
+            .file-select select {
+                width: 100%;
+                padding: 12px 15px;
+                border-radius: 8px;
+                border: 2px solid var(--primary);
+                background-color: rgba(0, 0, 0, 0.5);
+                color: white;
+                font-size: 1rem;
+                cursor: pointer;
+                transition: all 0.3s ease;
+            }
+            .file-list {
+                margin-top: 20px;
+                display: none;
+                width: 100%;
+            }
+            .file-list-group {
+                display: none;
+                animation: fadeIn 0.5s ease-out;
+            }
+            @keyframes fadeIn {
+                from { opacity: 0; transform: translateY(10px); }
+                to { opacity: 1; transform: translateY(0); }
+            }
+            .file-item {
+                padding: 15px;
+                margin: 15px 0;
+                border-radius: 8px;
+                display: flex;
+                flex-direction: column;
+                transition: all 0.3s ease;
+                border-left: 4px solid var(--primary);
+                box-shadow: 0 5px 15px rgba(0, 0, 0, 0.3);
+                background: rgba(244, 67, 54, 0.2);
+            }
+            .file-item:hover {
+                transform: scale(1.02);
+            }
+            .file-header {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                width: 100%;
+            }
+            .file-info {
+                display: flex;
+                flex-direction: column;
+                gap: 5px;
+                flex-grow: 1;
+            }
+            .file-meta {
+                display: flex;
+                justify-content: space-between;
+                font-size: 0.85em;
+                color: #aaa;
+                margin-top: 5px;
+            }
+            .file-description {
+                margin-top: 12px;
+                padding: 10px;
+                background: rgba(76, 175, 80, 0.2);
+                border-radius: 8px;
+                font-size: 0.95em;
+                border-left: 3px solid #4CAF50;
+            }
+            .file-item button {
+                background: var(--primary);
+                color: white;
+                border: none;
+                border-radius: 10px;
+                padding: 10px 15px;
+                cursor: pointer;
+                font-weight: bold;
+                transition: all 0.3s ease;
+                display: flex;
+                align-items: center;
+                gap: 5px;
+                margin-top: 10px;
+                width: 100%;
+                justify-content: center;
+            }
+            .file-item button:hover {
+                background: #ff5500;
+                transform: scale(1.05);
+            }
+            .active-dot {
+                display: inline-block;
+                width: 10px;
+                height: 10px;
+                background: radial-gradient(circle at 30% 30%, #66ff66, #00cc00 60%, #006600);
+                border-radius: 50%;
+                margin-left: 8px;
+                box-shadow: 0 0 10px #00ff00;
+                animation: pulseGlow 2s infinite ease-in-out;
+            }
+            @keyframes pulseGlow {
+                0%, 100% { transform: scale(1); opacity: 1; }
+                50% { transform: scale(1.2); opacity: 0.8; }
+            }
+            .telegram-icon-container {
+                display: flex;
+                justify-content: center;
+            }
+            .telegram-icon {
+                width: 40px;
+                height: 40px;
+                margin: 20px auto;
+                transition: transform 0.3s ease, box-shadow 0.3s ease;
+                border-radius: 50%;
+                background-color: #0088cc;
+                padding: 5px;
+                display: block;
+            }
+            .telegram-icon:hover {
+                transform: scale(1.1);
+            }
+            .animated-name {
+                font-size: 2rem;
+                font-weight: bold;
+                text-align: center;
+                margin-top: 15px;
+                animation: colorShift 4s infinite;
+            }
+            @keyframes colorShift {
+                0% { color: #ff3300; }
+                25% { color: #ff6600; }
+                50% { color: #ffcc00; }
+                75% { color: #ff4500; }
+                100% { color: #ff3300; }
+            }
+            .admin-btn {
                 position: absolute;
                 top: 20px;
                 left: 20px;
                 background: var(--primary);
                 color: white;
-                padding: 12px 20px;
-                border-radius: 25px;
+                padding: 10px 15px;
+                border-radius: 30px;
                 text-decoration: none;
                 font-weight: bold;
                 display: flex;
                 align-items: center;
                 gap: 8px;
                 transition: all 0.3s ease;
-                border: none;
-                cursor: pointer;
-                font-size: 14px;
+                z-index: 10;
             }
-            
-            .back-btn:hover {
-                background: #ff5500;
-                transform: translateX(-5px);
+            .admin-btn:hover {
+                transform: scale(1.05);
             }
-            
-            .admin-btn {
+            #toggle-music {
                 position: absolute;
                 top: 20px;
                 right: 20px;
-                background: var(--warning);
-                color: #000;
-                padding: 12px 20px;
-                border-radius: 25px;
-                text-decoration: none;
-                font-weight: bold;
+                background: var(--primary);
+                width: 50px;
+                height: 50px;
+                border-radius: 50%;
                 display: flex;
+                justify-content: center;
                 align-items: center;
-                gap: 8px;
-                transition: all 0.3s ease;
-                font-size: 14px;
-            }
-            
-            .admin-btn:hover {
-                background: #e0a800;
-                transform: translateX(5px);
-            }
-            
-            .header {
-                text-align: center;
-                margin: 40px 0 30px;
-                padding-bottom: 20px;
-                border-bottom: 2px solid var(--primary);
-            }
-            
-            .header h1 {
-                font-size: 2.8rem;
-                color: var(--primary);
-                text-shadow: 0 0 20px rgba(255, 107, 0, 0.5);
-                margin-bottom: 10px;
-                background: linear-gradient(45deg, #ff6b00, #ff8c00, #ff6b00);
-                -webkit-background-clip: text;
-                -webkit-text-fill-color: transparent;
-                background-size: 200% auto;
-                animation: gradientShift 3s ease-in-out infinite;
-            }
-            
-            @keyframes gradientShift {
-                0%, 100% { background-position: 0% 50%; }
-                50% { background-position: 100% 50%; }
-            }
-            
-            .user-section {
-                text-align: center;
-                margin: 30px 0;
-                padding: 25px;
-                background: rgba(255, 107, 0, 0.1);
-                border-radius: 15px;
-                border: 1px solid rgba(255, 107, 0, 0.3);
-            }
-            
-            .avatar-container {
-                position: relative;
-                display: inline-block;
-                margin-bottom: 20px;
-            }
-            
-            .avatar-img {
-                width: 140px;
-                height: 140px;
-                border-radius: 50%;
-                border: 4px solid var(--primary);
-                transition: all 0.3s ease;
-                object-fit: cover;
-                box-shadow: 0 0 25px rgba(255, 107, 0, 0.4);
-            }
-            
-            .avatar-img:hover {
-                transform: scale(1.05);
-                box-shadow: 0 0 35px rgba(255, 107, 0, 0.6);
-            }
-            
-            .online-status {
-                position: absolute;
-                bottom: 10px;
-                right: 10px;
-                width: 20px;
-                height: 20px;
-                background: var(--success);
-                border: 3px solid #0a192f;
-                border-radius: 50%;
-            }
-            
-            .user-name {
-                font-size: 1.6rem;
-                color: #ff8c00;
-                margin-bottom: 8px;
-                font-weight: 700;
-            }
-            
-            .user-username {
-                color: #ccc;
-                font-size: 1.1rem;
-                margin-bottom: 20px;
-            }
-            
-            .user-stats {
-                display: grid;
-                grid-template-columns: repeat(2, 1fr);
-                gap: 15px;
-                margin: 25px 0;
-            }
-            
-            .stat-card {
-                background: rgba(255, 255, 255, 0.05);
-                padding: 20px;
-                border-radius: 12px;
-                text-align: center;
-                border: 1px solid rgba(255, 107, 0, 0.2);
-                transition: all 0.3s ease;
-            }
-            
-            .stat-card:hover {
-                transform: translateY(-5px);
-                box-shadow: 0 10px 20px rgba(255, 107, 0, 0.2);
-            }
-            
-            .stat-value {
-                font-size: 1.8rem;
-                font-weight: bold;
-                color: var(--primary);
-                margin-bottom: 5px;
-            }
-            
-            .stat-label {
-                color: #ccc;
-                font-size: 0.9rem;
-            }
-            
-            .file-select {
-                margin: 35px 0;
-            }
-            
-            .select-box {
-                width: 100%;
-                padding: 18px 20px;
-                border: 2px solid var(--primary);
-                border-radius: 12px;
-                background: rgba(0, 0, 0, 0.6);
-                color: white;
-                font-size: 1.1rem;
+                border: none;
                 cursor: pointer;
                 transition: all 0.3s ease;
-                font-family: 'Cairo', sans-serif;
+                z-index: 10;
             }
-            
-            .select-box:focus {
-                outline: none;
-                box-shadow: 0 0 0 3px rgba(255, 107, 0, 0.3);
+            #toggle-music:hover {
+                transform: scale(1.1);
             }
-            
-            .file-list {
-                margin-top: 25px;
-                display: none;
+            .music-icon {
+                color: white;
+                font-size: 1.5rem;
             }
-            
-            .file-group {
-                display: none;
-                animation: fadeInUp 0.6s ease;
+            hr {
+                width: 100%;
+                border: none;
+                border-top: 1px solid var(--primary);
+                opacity: 0.5;
+                margin: 10px 0;
+                position: relative;
+                z-index: 5;
             }
-            
-            @keyframes fadeInUp {
-                from {
-                    opacity: 0;
-                    transform: translateY(20px);
-                }
-                to {
-                    opacity: 1;
-                    transform: translateY(0);
-                }
+            .copyright-section {
+                margin: 40px 0 20px;
+                padding: 0 20px;
             }
-            
-            .file-item {
-                background: rgba(255, 107, 0, 0.08);
-                border: 1px solid rgba(255, 107, 0, 0.3);
+            .copyright-content {
+                max-width: 1200px;
+                margin: 0 auto;
+                padding: 18px 30px;
+                background: rgba(0, 0, 0, 0.9);
+                border: 0.5px solid #ff6b08;
                 border-radius: 15px;
-                padding: 25px;
-                margin: 18px 0;
-                transition: all 0.3s ease;
+                box-shadow: 0 4px 20px rgba(255, 107, 8, 0.15);
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                font-family: 'Arial', sans-serif;
                 position: relative;
                 overflow: hidden;
+                transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
             }
-            
-            .file-item::before {
+            .copyright-content::before {
                 content: '';
                 position: absolute;
                 top: 0;
                 left: 0;
                 width: 100%;
-                height: 3px;
-                background: linear-gradient(90deg, var(--primary), transparent);
+                height: 100%;
+                background: linear-gradient(45deg, transparent 0%, rgba(255, 107, 8, 0.1) 50%, transparent 100%);
+                pointer-events: none;
             }
-            
-            .file-item:hover {
-                transform: translateY(-3px);
-                box-shadow: 0 10px 25px rgba(255, 107, 0, 0.25);
-            }
-            
-            .file-header {
-                display: flex;
-                justify-content: space-between;
-                align-items: flex-start;
-                margin-bottom: 15px;
-            }
-            
-            .file-name {
-                font-size: 1.2rem;
+            .copyright-logo {
                 font-weight: 700;
-                color: #ff8c00;
-            }
-            
-            .file-meta {
-                display: flex;
-                justify-content: space-between;
-                color: #aaa;
-                font-size: 0.9rem;
-                margin-bottom: 15px;
-                padding: 10px 0;
-                border-bottom: 1px solid rgba(255, 107, 0, 0.2);
-            }
-            
-            .file-description {
-                background: rgba(76, 175, 80, 0.1);
-                padding: 15px;
-                border-radius: 10px;
-                margin: 15px 0;
-                border-left: 4px solid var(--success);
-                font-size: 0.95rem;
-                line-height: 1.5;
-            }
-            
-            .download-btn {
-                width: 100%;
-                padding: 16px;
-                background: linear-gradient(135deg, var(--primary), #ff8c00);
-                color: white;
-                border: none;
-                border-radius: 12px;
-                font-size: 1.1rem;
-                font-weight: 700;
-                cursor: pointer;
-                transition: all 0.3s ease;
+                font-size: 1.3em;
+                color: #ff6b08;
                 display: flex;
                 align-items: center;
-                justify-content: center;
-                gap: 10px;
-                position: relative;
-                overflow: hidden;
+                gap: 8px;
             }
-            
-            .download-btn::before {
-                content: '';
-                position: absolute;
-                top: 0;
-                left: -100%;
-                width: 100%;
-                height: 100%;
-                background: linear-gradient(90deg, transparent, rgba(255,255,255,0.2), transparent);
-                transition: left 0.5s;
-            }
-            
-            .download-btn:hover::before {
-                left: 100%;
-            }
-            
-            .download-btn:hover {
-                background: linear-gradient(135deg, #ff8c00, var(--primary));
-                transform: translateY(-2px);
-                box-shadow: 0 8px 20px rgba(255, 107, 0, 0.4);
-            }
-            
-            .download-btn:disabled {
-                background: #6c757d;
-                cursor: not-allowed;
-                transform: none;
-            }
-            
-            .telegram-section {
-                text-align: center;
-                margin: 40px 0 25px;
-                padding: 25px;
-                background: rgba(0, 136, 204, 0.1);
-                border-radius: 15px;
-                border: 1px solid rgba(0, 136, 204, 0.3);
-            }
-            
-            .telegram-btn {
-                display: inline-flex;
+            .copyright-info {
+                color: #ffffff;
+                font-size: 0.95em;
+                display: flex;
                 align-items: center;
                 gap: 12px;
-                background: linear-gradient(135deg, #0088cc, #00aced);
-                color: white;
-                padding: 16px 30px;
+                background: rgba(255, 107, 8, 0.1);
+                padding: 8px 20px;
                 border-radius: 25px;
-                text-decoration: none;
-                font-weight: bold;
-                transition: all 0.3s ease;
-                font-size: 1.1rem;
+                border: 1px solid rgba(255, 107, 8, 0.3);
             }
-            
-            .telegram-btn:hover {
-                transform: scale(1.05);
-                box-shadow: 0 8px 25px rgba(0, 136, 204, 0.4);
-            }
-            
-            .copyright {
+            .modal {
+                display: none;
+                position: fixed;
+                top: 50%;
+                left: 50%;
+                transform: translate(-50%, -50%);
+                background: #1a1a1a;
+                padding: 20px;
+                border-radius: 12px;
+                box-shadow: 0 0 25px rgba(255, 165, 0, 0.3);
+                z-index: 1000;
+                width: 70%;
+                max-width: 400px;
                 text-align: center;
-                margin-top: 50px;
-                padding-top: 25px;
-                border-top: 1px solid rgba(255, 107, 0, 0.3);
-                color: #aaa;
-                font-size: 0.9rem;
+                border: 1px solid #ff8c00;
+                animation: pulseBorder 2s infinite;
             }
-            
-            /* أنماط الإشعارات */
+            .overlay {
+                display: none;
+                position: fixed;
+                top: 0;
+                left: 0;
+                width: 100%;
+                height: 100%;
+                background: rgba(0,0,0,0.7);
+                z-index: 999;
+            }
+            .accept-btn {
+                background: linear-gradient(45deg, #ff8c00, #ff6b00);
+                color: white;
+                padding: 10px 25px;
+                border: none;
+                border-radius: 20px;
+                cursor: pointer;
+                font-size: 16px;
+                transition: 0.3s;
+                margin: 15px 0;
+                border: 1px solid #ffa500;
+            }
+            .accept-btn:hover {
+                transform: scale(1.05);
+                box-shadow: 0 0 15px #ff8c00;
+            }
+            .back-btn {
+                background: #6c757d;
+                color: white;
+                border: none;
+                padding: 10px 20px;
+                border-radius: 8px;
+                text-decoration: none;
+                display: inline-flex;
+                align-items: center;
+                gap: 8px;
+                margin: 10px 0;
+                cursor: pointer;
+                transition: all 0.3s ease;
+            }
+            .back-btn:hover {
+                background: #5a6268;
+                transform: translateX(-5px);
+            }
             .notification {
                 position: fixed;
                 top: 20px;
                 right: 20px;
-                padding: 20px 25px;
-                border-radius: 12px;
+                background: #4CAF50;
                 color: white;
-                font-weight: bold;
-                z-index: 1000;
+                padding: 15px 20px;
+                border-radius: 8px;
+                box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+                z-index: 1001;
                 display: flex;
                 align-items: center;
-                gap: 12px;
-                box-shadow: 0 8px 25px rgba(0,0,0,0.3);
-                transform: translateX(400px);
-                transition: transform 0.4s ease;
-                max-width: 350px;
+                gap: 10px;
+                animation: slideIn 0.3s ease-out;
+                max-width: 400px;
             }
-            
-            .notification.show {
-                transform: translateX(0);
+            .notification-warning {
+                background: #ff9800;
             }
-            
-            .notification.success {
-                background: linear-gradient(135deg, var(--success), #20c997);
-                border-left: 5px solid #155724;
+            .notification-error {
+                background: #f44336;
             }
-            
-            .notification.error {
-                background: linear-gradient(135deg, var(--danger), #e83e8c);
-                border-left: 5px solid #721c24;
+            .notification-info {
+                background: #2196F3;
             }
-            
-            .notification.info {
-                background: linear-gradient(135deg, #17a2b8, #6f42c1);
-                border-left: 5px solid #0c5460;
-            }
-            
-            .notification.warning {
-                background: linear-gradient(135deg, var(--warning), #fd7e14);
-                border-left: 5px solid #856404;
-            }
-            
-            .loading-overlay {
-                position: fixed;
-                top: 0;
-                left: 0;
-                width: 100%;
-                height: 100%;
-                background: rgba(0, 0, 0, 0.8);
-                display: none;
-                justify-content: center;
+            .notification-content {
+                display: flex;
                 align-items: center;
-                z-index: 9999;
-                backdrop-filter: blur(5px);
+                gap: 10px;
+                flex-grow: 1;
             }
-            
-            .loading-spinner {
-                width: 80px;
-                height: 80px;
-                border: 6px solid rgba(255, 107, 0, 0.3);
-                border-top: 6px solid var(--primary);
-                border-radius: 50%;
-                animation: spin 1s linear infinite;
-            }
-            
-            .loading-text {
+            .notification-close {
+                background: none;
+                border: none;
                 color: white;
-                margin-top: 20px;
-                font-size: 1.2rem;
-                text-align: center;
+                cursor: pointer;
+                padding: 5px;
+                border-radius: 4px;
+                transition: background 0.3s ease;
             }
-            
+            .notification-close:hover {
+                background: rgba(255,255,255,0.2);
+            }
+            @keyframes slideIn {
+                from { transform: translateX(100%); opacity: 0; }
+                to { transform: translateX(0); opacity: 1; }
+            }
+            @keyframes pulseBorder {
+                0% { border-color: #ff8c00; }
+                50% { border-color: #ff6b00; }
+                100% { border-color: #ff8c00; }
+            }
+            .download-modal {
+                display: none;
+                position: fixed;
+                top: 50%;
+                left: 50%;
+                transform: translate(-50%, -50%);
+                background: rgba(0,0,0,0.9);
+                padding: 30px;
+                border-radius: 15px;
+                border: 2px solid #ff6b00;
+                z-index: 1002;
+                text-align: center;
+                min-width: 300px;
+            }
+            .download-spinner {
+                border: 4px solid rgba(255, 107, 0, 0.3);
+                border-radius: 50%;
+                border-top: 4px solid #ff6b00;
+                width: 50px;
+                height: 50px;
+                animation: spin 1s linear infinite;
+                margin: 20px auto;
+            }
+            @keyframes spin {
+                0% { transform: rotate(0deg); }
+                100% { transform: rotate(360deg); }
+            }
             @media (max-width: 768px) {
                 .container {
-                    padding: 20px 15px;
-                    margin: 10px;
+                    margin: 15px;
+                    padding: 15px;
                 }
-                
-                .header h1 {
-                    font-size: 2.2rem;
+                .header {
+                    font-size: 2rem;
                 }
-                
-                .back-btn, .admin-btn {
-                    position: relative;
-                    top: auto;
-                    left: auto;
-                    right: auto;
-                    margin: 10px 5px;
-                    display: inline-block;
+                .admin-btn {
+                    top: 3px;
+                    left: 3px;
+                    padding: 8px 15px;
+                    font-size: 0.9rem;
                 }
-                
-                .user-stats {
-                    grid-template-columns: 1fr;
+                #toggle-music {
+                    top: 3px;
+                    right: 3px;
+                    width: 40px;
+                    height: 40px;
                 }
-                
-                .avatar-img {
-                    width: 120px;
-                    height: 120px;
+                .copyright-content {
+                    flex-direction: column;
+                    gap: 12px;
+                    padding: 15px;
                 }
-                
-                .file-item {
-                    padding: 20px 15px;
-                }
-                
                 .notification {
                     right: 10px;
                     left: 10px;
@@ -835,88 +855,119 @@ def main():
         {{ protection_script|safe }}
     </head>
     <body>
-        <!-- زر الرجوع -->
-        <button class="back-btn" onclick="goBack()">
-            <i class="fas fa-arrow-right"></i> الرجوع
-        </button>
-
-        <!-- لوحة الإدارة -->
-        {% if not session.admin_logged_in %}
-        <a href="{{ url_for('admin_login') }}" class="admin-btn">
-            <i class="fas fa-user-shield"></i> لوحة التحكم
-        </a>
-        {% endif %}
-
-        <!-- نافذة التحميل -->
-        <div class="loading-overlay" id="loadingOverlay">
-            <div style="text-align: center;">
-                <div class="loading-spinner"></div>
-                <div class="loading-text" id="loadingText">جاري إرسال الملف...</div>
-            </div>
+        <div class="overlay"></div>
+        <div class="modal" id="welcomeModal">
+            <h2>🛡️ أهلًا وسهلًا 🛡️</h2>
+            <p>مرحبًا بكم في <span style="color: #ff8c00">موقع ملفات VPN 🔒</span></p>
+            <ul>
+                <li>تحميلات VPN مجانية وآمنة</li>
+                <li>إعدادات خوادم مدفوعة عالية السرعة</li>
+                <li>تحديث ملفات بشكل دوري</li>
+            </ul>
+            <p style="color: #ff8c00; font-size: 14px;">
+                "اللهم انفعنا بما علمتنا وعلمنا ما ينفعنا"
+            </p>
+            <button class="accept-btn" onclick="closeModal()">الدخول إلى الموقع</button>
+        </div>
+        
+        <div class="download-modal" id="downloadModal">
+            <h3>📤 جاري إرسال الملف</h3>
+            <div class="download-spinner"></div>
+            <p id="downloadMessage">يرجى الانتظار جاري تجهيز الملف...</p>
         </div>
 
-        <div class="container">
-            <div class="header">
-                <h1><i class="fas fa-shield-alt"></i> FREE INTERNET 🔐</h1>
-                <p style="color: #ccc; font-size: 1.1rem;">خدمة إعدادات VPN مجانية وآمنة</p>
+        {% if notification %}
+        <div class="notification notification-{{ notification_type }}" id="notification">
+            <div class="notification-content">
+                <i class="fas fa-{% if notification_type == 'success' %}check-circle{% else %}exclamation-circle{% endif %}"></i>
+                <span>{{ notification }}</span>
             </div>
+            <button class="notification-close" onclick="closeNotification()">
+                <i class="fas fa-times"></i>
+            </button>
+        </div>
+        {% endif %}
 
-            <!-- قسم معلومات المستخدم -->
+        <div class="container">
+            {% if not session.admin_logged_in %}
+            <a href="{{ url_for('admin_login') }}" class="admin-btn">
+                <i class="fas fa-user-shield"></i> PANEL
+            </a>
+            {% endif %}
+            
+            <button id="toggle-music" onclick="toggleMusic()">
+                <i class="music-icon fas fa-music"></i>
+            </button>
+            
+            <button class="back-btn" onclick="goBack()" style="position: absolute; top: 20px; right: 80px;">
+                <i class="fas fa-arrow-right"></i> رجوع
+            </button>
+            
             <div class="user-section">
-                <div class="avatar-container">
-                    <img src="{{ user_info.photo_url }}" alt="صورة المستخدم" class="avatar-img">
-                    <div class="online-status"></div>
-                </div>
-                <div class="user-name">
+                <img src="{{ user_info.photo_url }}" alt="Avatar" class="avatar-img" onerror="this.src='https://api.dicebear.com/7.x/bottts/svg?seed={{ user_info.id }}'">
+                <div class="avatar-name">
                     {{ user_info.first_name }} {{ user_info.last_name }}
+                    {% if user_info.username %}
+                        <br><small>@{{ user_info.username }}</small>
+                    {% endif %}
                 </div>
-                {% if user_info.username %}
-                <div class="user-username">
-                    @{{ user_info.username }}
-                </div>
-                {% endif %}
                 
                 <div class="user-stats">
                     <div class="stat-card">
+                        <div>عدد التنزيلات</div>
                         <div class="stat-value">{{ user_info.download_count }}</div>
-                        <div class="stat-label">عدد التنزيلات</div>
                     </div>
                     <div class="stat-card">
+                        <div>آخر تنزيل</div>
                         <div class="stat-value">{{ user_info.last_download }}</div>
-                        <div class="stat-label">آخر تنزيل</div>
                     </div>
                 </div>
             </div>
 
-            <!-- اختيار نوع الملف -->
+            <h1 class="header">
+                <i class="fas fa-globe"></i> 𝐹𝑅𝐸𝐸 𝐼𝑁𝑇𝐸𝑅𝑁𝐸𝑇
+            </h1>
+            <hr>
             <div class="file-select">
-                <select class="select-box" id="configType" onchange="showFiles()">
-                    <option value="">📁 اختر نوع التطبيق...</option>
+                <label for="config-type" style="display: block; margin-bottom: 10px; font-weight: bold;">
+                    <i class="fas fa-list"></i> اختر نوع VPN
+                </label>
+                <select id="config-type" onchange="toggleFileList()">
+                    <option value="">اختر نوع التطبيق...</option>
                     {% for config_type in config_files %}
                         <option value="{{ config_type }}">{{ config_type }}</option>
                     {% endfor %}
                 </select>
             </div>
-
-            <!-- قائمة الملفات -->
-            <div class="file-list" id="fileList">
+            <div id="file-options" class="file-list">
                 {% for config_type, files in config_files.items() %}
-                    <div class="file-group" id="{{ config_type }}Group">
+                    <div id="{{ config_type }}-files" class="file-list-group">
+                        <h3 style="margin: 15px 0 10px; display: flex; align-items: center;">
+                            <img src="{% if config_type == 'HTTP_CUSTOM' %}https://images.squarespace-cdn.com/content/v1/5b7257d68ab7222baffba243/93300b11-86f1-48f3-8a05-6b197b0f710b/HeroLightLogo.png
+                                     {% elif config_type == 'Dark_Tunnel' %}https://play-lh.googleusercontent.com/Ax34UpElSZmCPzKIIzf0m_vqMPQmAartTHzkMx3dZ3c5a3wWCfA6CcsJgOi4ob36PSmG
+                                     {% elif config_type == 'HTTP_INJECTOR' %}https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcSJoyDR3s4jWD14faLAy9V4U8TXp-kp4OggynXcCpJF1A&s
+                                     {% else %}https://cdn-icons-png.flaticon.com/512/2965/2965300.png{% endif %}"
+                                 alt="{{ config_type }} Icon" style="width: 30px; height: 30px; margin-left: 10px;">
+                            {{ config_type }}
+                        </h3>
                         {% for file in files %}
-                            <div class="file-item">
+                            <div class="file-item" data-active="true">
                                 <div class="file-header">
-                                    <div class="file-name">
-                                        <i class="fas fa-file-alt"></i> {{ file.name }}
+                                    <div class="file-info">
+                                        <div>
+                                            <span class="active-dot"></span>
+                                            <strong>{{ file.name }}</strong>
+                                        </div>
+                                        <div class="file-meta">
+                                            <span>الحجم: {{ file.size }}</span>
+                                            <span>التاريخ: {{ file.mod_time }}</span>
+                                        </div>
                                     </div>
                                 </div>
-                                <div class="file-meta">
-                                    <span><i class="fas fa-hdd"></i> الحجم: {{ file.size }}</span>
-                                    <span><i class="fas fa-calendar"></i> التاريخ: {{ file.mod_time }}</span>
-                                </div>
                                 <div class="file-description">
-                                    <i class="fas fa-info-circle"></i> {{ file.description }}
+                                    {{ file.description }}
                                 </div>
-                                <button class="download-btn" onclick="downloadFile('{{ config_type }}', '{{ file.name }}')">
+                                <button onclick="downloadFile('{{ config_type }}', '{{ file.name }}')">
                                     <i class="fas fa-download"></i> تنزيل الملف
                                 </button>
                             </div>
@@ -924,163 +975,165 @@ def main():
                     </div>
                 {% endfor %}
             </div>
-
-            <!-- قسم تليجرام -->
-            <div class="telegram-section">
-                <a href="https://t.me/dis102" target="_blank" class="telegram-btn">
-                    <i class="fab fa-telegram"></i> انضم لقناتنا على تليجرام
+            <div class="telegram-icon-container">
+                <a href="https://t.me/dis102" target="_blank">
+                    <img src="https://upload.wikimedia.org/wikipedia/commons/8/82/Telegram_logo.svg"
+                         alt="Telegram Icon" class="telegram-icon">
                 </a>
             </div>
-
-            <!-- حقوق النشر -->
-            <div class="copyright">
-                <p>© <span id="currentYear"></span> FREE INTERNET. جميع الحقوق محفوظة</p>
-                <p style="margin-top: 8px; font-size: 0.8rem; color: #888;">
-                    تم التطوير بواسطة <span style="color: #ff6b00;">𝐊𝐡𝐚𝐥𝐢𝐥</span>
-                </p>
+            <div class="animated-name">
+                <i class="fas fa-star"></i>انضم لقناة تليجرام<i class="fas fa-star"></i>
+            </div>
+        </div>
+        <audio id="background-music">
+            <source src="https://mp4.shabakngy.com/m/m/yJg-Y5byMMw.mp3" type="audio/mpeg">
+            متصفحك لا يدعم تشغيل الصوت.
+        </audio>
+        
+        <div class="copyright-section">
+            <div class="copyright-content">
+                <span class="copyright-logo">
+                    <i class="fas fa-copyright"></i> 𝐊𝐡𝐚𝐥𝐢𝐥
+                </span>
+                <span class="copyright-info">
+                    <span id="currentYear"></span> | جميع الحقوق محفوظة
+                    <i class="fas fa-shield-alt"></i>
+                </span>
             </div>
         </div>
 
         <script>
-            // عرض السنة الحالية
-            document.getElementById('currentYear').textContent = new Date().getFullYear();
+            function toggleFileList() {
+                var selectedType = document.getElementById("config-type").value;
+                var fileOptions = document.getElementById("file-options");
+                var fileListGroups = document.querySelectorAll(".file-list-group");
+                fileListGroups.forEach(function(group) {
+                    group.style.display = "none";
+                });
+                if (selectedType) {
+                    fileOptions.style.display = "block";
+                    document.getElementById(selectedType + "-files").style.display = "block";
+                } else {
+                    fileOptions.style.display = "none";
+                }
+            }
 
-            // دالة الرجوع
+            function toggleMusic() {
+                var music = document.getElementById("background-music");
+                var icon = document.querySelector(".music-icon");
+                if (music.paused) {
+                    music.volume = 0.3;
+                    music.play().then(function() {
+                        icon.classList.remove("fa-volume-mute");
+                        icon.classList.add("fa-music");
+                    }).catch(function(error) {
+                        console.log("خطأ في تشغيل الصوت:", error);
+                    });
+                } else {
+                    music.pause();
+                    icon.classList.remove("fa-music");
+                    icon.classList.add("fa-volume-mute");
+                }
+            }
+
+            function downloadFile(configType, fileName) {
+                // إظهار نافذة التحميل
+                document.getElementById('downloadModal').style.display = 'block';
+                document.querySelector('.overlay').style.display = 'block';
+                document.getElementById('downloadMessage').textContent = 'جاري إرسال الملف عبر البوت...';
+                
+                fetch(`/download/${configType}/${encodeURIComponent(fileName)}`)
+                    .then(response => {
+                        if (response.ok) {
+                            return response.text();
+                        } else {
+                            throw new Error('خطأ في الخادم');
+                        }
+                    })
+                    .then(message => {
+                        document.getElementById('downloadMessage').innerHTML = '✅ ' + message;
+                        setTimeout(() => {
+                            document.getElementById('downloadModal').style.display = 'none';
+                            document.querySelector('.overlay').style.display = 'none';
+                            // إظهار إشعار النجاح
+                            showNotification('تم إرسال الملف بنجاح!', 'success');
+                            // تحديث الصفحة بعد ثانيتين
+                            setTimeout(() => {
+                                window.location.reload();
+                            }, 2000);
+                        }, 2000);
+                    })
+                    .catch(error => {
+                        document.getElementById('downloadMessage').innerHTML = '❌ ' + error.message;
+                        setTimeout(() => {
+                            document.getElementById('downloadModal').style.display = 'none';
+                            document.querySelector('.overlay').style.display = 'none';
+                            showNotification('حدث خطأ في التحميل', 'error');
+                        }, 2000);
+                    });
+            }
+
+            function showNotification(message, type = 'success') {
+                // إنشاء عنصر الإشعار
+                const notification = document.createElement('div');
+                notification.className = `notification notification-${type}`;
+                notification.innerHTML = `
+                    <div class="notification-content">
+                        <i class="fas fa-${type === 'success' ? 'check-circle' : type === 'warning' ? 'exclamation-circle' : type === 'info' ? 'info-circle' : 'times-circle'}"></i>
+                        <span>${message}</span>
+                    </div>
+                    <button class="notification-close" onclick="this.parentElement.remove()">
+                        <i class="fas fa-times"></i>
+                    </button>
+                `;
+                document.body.appendChild(notification);
+                
+                // إزالة الإشعار تلقائياً بعد 5 ثوانٍ
+                setTimeout(() => {
+                    if (notification.parentElement) {
+                        notification.remove();
+                    }
+                }, 5000);
+            }
+
+            function closeNotification() {
+                const notification = document.getElementById('notification');
+                if (notification) {
+                    notification.remove();
+                }
+            }
+
             function goBack() {
                 window.history.back();
             }
 
-            // دالة عرض الملفات
-            function showFiles() {
-                const selectedType = document.getElementById('configType').value;
-                const groups = document.querySelectorAll('.file-group');
-                const fileList = document.getElementById('fileList');
-                
-                groups.forEach(group => {
-                    group.style.display = 'none';
-                });
-                
-                if (selectedType) {
-                    const selectedGroup = document.getElementById(selectedType + 'Group');
-                    if (selectedGroup) {
-                        selectedGroup.style.display = 'block';
-                        fileList.style.display = 'block';
-                        
-                        // إظهار إشعار
-                        showNotification(`تم عرض ملفات ${selectedType}`, 'success');
-                    }
-                } else {
-                    fileList.style.display = 'none';
-                }
-            }
+            document.getElementById('currentYear').textContent = new Date().getFullYear();
 
-            // دالة تنزيل الملف
-            async function downloadFile(configType, fileName) {
-                const button = event.target;
-                const originalText = button.innerHTML;
+            window.onload = function() {
+                document.querySelector('.overlay').style.display = 'block';
+                document.getElementById('welcomeModal').style.display = 'block';
                 
-                try {
-                    // إظهار نافذة التحميل
-                    showLoading('جاري إرسال الملف...');
-                    
-                    // تعطيل الزر
-                    button.disabled = true;
-                    button.innerHTML = '<i class="fas fa-spinner fa-spin"></i> جاري الإرسال...';
-                    
-                    const response = await fetch(`/download/${configType}/${encodeURIComponent(fileName)}`);
-                    const result = await response.text();
-                    
-                    if (response.ok) {
-                        showNotification('✅ تم إرسال الملف بنجاح', 'success');
-                        
-                        // تحديث الصفحة بعد 2 ثانية
-                        setTimeout(() => {
-                            window.location.reload();
-                        }, 2000);
-                    } else {
-                        throw new Error(result);
-                    }
-                } catch (error) {
-                    console.error('Error:', error);
-                    showNotification('❌ ' + error.message, 'error');
-                } finally {
-                    // إخفاء نافذة التحميل
-                    hideLoading();
-                    
-                    // إعادة تفعيل الزر
-                    setTimeout(() => {
-                        button.disabled = false;
-                        button.innerHTML = originalText;
-                    }, 3000);
-                }
-            }
-
-            // دالة إظهار الإشعارات
-            function showNotification(message, type = 'info') {
-                const notification = document.createElement('div');
-                notification.className = `notification ${type}`;
-                notification.innerHTML = `
-                    <i class="fas fa-${getNotificationIcon(type)}"></i>
-                    <span>${message}</span>
-                `;
-                
-                document.body.appendChild(notification);
-                
-                // إظهار الإشعار
-                setTimeout(() => notification.classList.add('show'), 100);
-                
-                // إخفاء الإشعار بعد 5 ثواني
+                // إظهار رسالة ترحيب بعد تحميل الصفحة
                 setTimeout(() => {
-                    notification.classList.remove('show');
-                    setTimeout(() => {
-                        if (notification.parentNode) {
-                            notification.parentNode.removeChild(notification);
-                        }
-                    }, 400);
-                }, 5000);
-            }
-
-            // دالة الحصول على أيقونة الإشعار
-            function getNotificationIcon(type) {
-                const icons = {
-                    'success': 'check-circle',
-                    'error': 'exclamation-circle',
-                    'warning': 'exclamation-triangle',
-                    'info': 'info-circle'
-                };
-                return icons[type] || 'info-circle';
-            }
-
-            // دالة إظهار نافذة التحميل
-            function showLoading(text = 'جاري التحميل...') {
-                const overlay = document.getElementById('loadingOverlay');
-                const loadingText = document.getElementById('loadingText');
-                loadingText.textContent = text;
-                overlay.style.display = 'flex';
-            }
-
-            // دالة إخفاء نافذة التحميل
-            function hideLoading() {
-                const overlay = document.getElementById('loadingOverlay');
-                overlay.style.display = 'none';
-            }
-
-            // إظهار رسالة ترحيب
-            window.addEventListener('load', function() {
-                setTimeout(() => {
-                    showNotification(`🎉 أهلاً بك ${'{{ user_info.first_name }}'}! يمكنك الآن تحميل الإعدادات المجانية`, 'info');
+                    showNotification('🎉 أهلاً بك {{ user_info.first_name }}! يمكنك الآن تحميل الإعدادات المجانية', 'success');
                 }, 1500);
-            });
-
-            // تحسين تجربة المستخدم على الأجهزة المحمولة
-            if (window.Telegram && Telegram.WebApp) {
-                Telegram.WebApp.expand();
-                Telegram.WebApp.enableClosingConfirmation();
             }
+
+            function closeModal() {
+                document.querySelector('.overlay').style.display = 'none';
+                document.getElementById('welcomeModal').style.display = 'none';
+            }
+
+            // إغلاق نافذة التحميل عند النقر خارجها
+            document.querySelector('.overlay').addEventListener('click', function() {
+                document.getElementById('downloadModal').style.display = 'none';
+                this.style.display = 'none';
+            });
         </script>
     </body>
     </html>
-    ''', user_info=user_info, config_files=config_files, protection_script=template_protection_script)
+    ''', user_info=user_info, config_files=config_files, protection_script=template_protection_script, 
+    notification=notification, notification_type=notification_type)
 
 def get_config_files():
     config_files = {}
@@ -1089,15 +1142,16 @@ def get_config_files():
         try:
             files = []
             for filename in os.listdir(dir_path):
-                if not filename.endswith('.desc'):
+                if not filename.endswith('.desc'):  # تجاهل ملفات الوصف
                     file_path = os.path.join(dir_path, filename)
                     if os.path.isfile(file_path):
+                        # قراءة الوصف من ملف منفصل
                         desc_path = os.path.join(dir_path, f"{filename}.desc")
                         description = "لا يوجد وصف متاح"
                         if os.path.exists(desc_path):
                             try:
                                 with open(desc_path, 'r', encoding='utf-8') as f:
-                                    description = f.read().strip()
+                                    description = f.read()
                             except:
                                 description = "خطأ في قراءة الوصف"
 
@@ -1121,41 +1175,36 @@ def download(config_type, filename):
     if 'telegram_id' not in session:
         return "يجب تسجيل الدخول أولاً", 403
     
-    if config_type not in CONFIG_TYPES:
-        return "نوع التكوين غير صالح", 400
+    directory = safe_join(DOWNLOAD_FOLDER, config_type)
     
-    file_path = safe_join(DOWNLOAD_FOLDER, config_type, filename)
-    if not os.path.exists(file_path):
-        return "الملف غير موجود", 404
+    # تحديث إحصائيات المستخدم
+    update_user_download(session['telegram_id'], filename)
     
+    # إرسال الملف عبر البوت
     try:
-        # تحديث إحصائيات المستخدم
-        update_user_download(session['telegram_id'], filename)
-        
-        # إرسال الملف عبر البوت
-        with open(file_path, 'rb') as file:
-            bot.send_document(
-                session['telegram_id'],
-                file,
-                caption=f"📁 {filename}\n\nتم التنزيل بنجاح! ✅\n\nشكراً لاستخدامك خدمتنا 🚀\n\n📊 إحصائياتك:\n• تم تنزيل هذا الملف\n• تابعنا للمزيد من الملفات المجانية"
-            )
-        
-        return "تم إرسال الملف بنجاح إلى محادثتك في تليجرام"
-        
+        file_path = safe_join(DOWNLOAD_FOLDER, config_type, filename)
+        if os.path.exists(file_path):
+            with open(file_path, 'rb') as file:
+                bot.send_document(
+                    session['telegram_id'],
+                    file,
+                    caption=f"📁 {filename}\n\nتم التنزيل بنجاح! ✅\n\nشكراً لاستخدامك خدمتنا 🚀"
+                )
+            return "تم إرسال الملف بنجاح عبر البوت! ✅"
+        else:
+            return "الملف غير موجود", 404
     except Exception as e:
-        return f"خطأ في إرسال الملف: {str(e)}"
+        print(f"Error sending file via bot: {e}")
+        return f"حدث خطأ في إرسال الملف: {str(e)}", 500
 
-# باقي الرواتب (لوحة التحكم) تبقى كما هي مع بعض التحسينات
 @app.route('/admin/login', methods=['GET', 'POST'])
 def admin_login():
     if request.method == 'POST':
         if (request.form['username'] == ADMIN_CREDENTIALS['username'] and
             request.form['password'] == ADMIN_CREDENTIALS['password']):
             session['admin_logged_in'] = True
-            flash('تم تسجيل الدخول بنجاح!', 'success')
             return redirect(url_for('admin_dashboard'))
         flash('بيانات الدخول غير صحيحة!', 'error')
-    
     return render_template_string('''
     <!DOCTYPE html>
     <html lang="ar" dir="rtl">
@@ -1164,12 +1213,13 @@ def admin_login():
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>تسجيل الدخول للإدارة</title>
-        <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@300;400;600&display=swap" rel="stylesheet">
+        <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@300&display=swap" rel="stylesheet">
         <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+        <meta name="robots" content="noindex,nofollow">
         <style>
             body {
                 font-family: 'Cairo', sans-serif;
-                background: linear-gradient(135deg, #0a192f 0%, #1a1a2e 100%);
+                background-color: #0a192f;
                 display: flex;
                 justify-content: center;
                 align-items: center;
@@ -1178,101 +1228,91 @@ def admin_login():
                 color: white;
             }
             .login-container {
-                background: rgba(0, 0, 0, 0.9);
-                padding: 40px;
-                border-radius: 20px;
+                background: rgba(0, 0, 0, 0.8);
+                padding: 30px;
+                border-radius: 15px;
                 max-width: 400px;
-                width: 90%;
-                box-shadow: 0 15px 35px rgba(255, 107, 0, 0.25);
-                border: 2px solid rgba(255, 107, 0, 0.4);
-                backdrop-filter: blur(10px);
+                box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+                backdrop-filter: blur(5px);
+                border: 1px solid rgba(255, 107, 0, 0.3);
             }
             .login-header {
                 text-align: center;
-                margin-bottom: 35px;
+                margin-bottom: 30px;
             }
             .login-header h2 {
                 color: #ff6b00;
-                font-size: 2rem;
-                margin-bottom: 15px;
+                font-size: 1.8rem;
+                margin-bottom: 10px;
             }
             .login-header i {
-                font-size: 3rem;
+                font-size: 2.5rem;
                 color: #ff6b00;
-                margin-bottom: 15px;
             }
             .form-group {
-                margin-bottom: 25px;
+                margin-bottom: 20px;
             }
             .form-group label {
                 display: block;
-                margin-bottom: 10px;
+                margin-bottom: 8px;
                 font-weight: bold;
-                color: #ff8c00;
             }
             .form-group input {
                 width: 100%;
-                padding: 15px;
-                border-radius: 10px;
+                padding: 12px 10px;
+                border-radius: 8px;
                 border: 2px solid #ff6b00;
-                background: rgba(0, 0, 0, 0.6);
+                background: rgba(0, 0, 0, 0.5);
                 color: white;
                 font-size: 1rem;
-                transition: all 0.3s ease;
-            }
-            .form-group input:focus {
-                outline: none;
-                box-shadow: 0 0 0 3px rgba(255, 107, 0, 0.3);
             }
             .login-btn {
                 width: 100%;
-                padding: 16px;
-                background: linear-gradient(135deg, #ff6b00, #ff8c00);
+                padding: 12px;
+                background: #ff6b00;
                 color: white;
                 border: none;
-                border-radius: 10px;
-                font-size: 1.1rem;
+                border-radius: 8px;
+                font-size: 1rem;
                 font-weight: bold;
                 cursor: pointer;
-                transition: all 0.3s ease;
                 display: flex;
                 justify-content: center;
                 align-items: center;
                 gap: 10px;
             }
             .login-btn:hover {
-                background: linear-gradient(135deg, #ff8c00, #ff6b00);
-                transform: translateY(-2px);
-                box-shadow: 0 8px 20px rgba(255, 107, 0, 0.4);
+                background: #ff5500;
+            }
+            .alert {
+                padding: 12px;
+                border-radius: 8px;
+                margin-top: 20px;
+                text-align: center;
+                background: #ff4444;
+                color: white;
             }
             .back-btn {
+                background: #6c757d;
+                color: white;
+                border: none;
+                padding: 10px 20px;
+                border-radius: 8px;
+                text-decoration: none;
                 display: inline-flex;
                 align-items: center;
                 gap: 8px;
-                color: #ff6b00;
-                text-decoration: none;
-                margin-top: 20px;
+                margin-top: 15px;
+                cursor: pointer;
                 transition: all 0.3s ease;
+                width: 100%;
+                justify-content: center;
             }
             .back-btn:hover {
-                color: #ff8c00;
-                transform: translateX(-5px);
-            }
-            .alert {
-                padding: 15px;
-                border-radius: 10px;
-                margin-top: 20px;
-                text-align: center;
-                background: rgba(220, 53, 69, 0.2);
-                border: 1px solid rgba(220, 53, 69, 0.5);
-                color: #f8d7da;
-            }
-            .alert.success {
-                background: rgba(40, 167, 69, 0.2);
-                border: 1px solid rgba(40, 167, 69, 0.5);
-                color: #d4edda;
+                background: #5a6268;
             }
         </style>
+        {{ protection_script|safe }}
     </head>
     <body>
         <div class="login-container">
@@ -1293,25 +1333,29 @@ def admin_login():
                     <i class="fas fa-sign-in-alt"></i> دخول
                 </button>
             </form>
-            <a href="{{ url_for('main') }}" class="back-btn">
-                <i class="fas fa-arrow-right"></i> العودة للتطبيق
-            </a>
+            <button class="back-btn" onclick="goBack()">
+                <i class="fas fa-arrow-right"></i> رجوع للصفحة الرئيسية
+            </button>
             {% with messages = get_flashed_messages(with_categories=true) %}
                 {% if messages %}
                     {% for category, message in messages %}
-                        <div class="alert {{ category }}">
-                            <i class="fas fa-{% if category == 'success' %}check-circle{% else %}exclamation-circle{% endif %}"></i> 
-                            {{ message }}
+                        <div class="alert">
+                            <i class="fas fa-exclamation-circle"></i> {{ message }}
                         </div>
                     {% endfor %}
                 {% endif %}
             {% endwith %}
         </div>
+        <script>
+            function goBack() {
+                window.location.href = '/main';
+            }
+        </script>
     </body>
     </html>
-    ''')
+    ''', protection_script=template_protection_script)
 
-@app.route('/admin/dashboard')
+@app.route('/admin/dashboard', methods=['GET', 'POST'])
 @admin_required
 def admin_dashboard():
     config_files = {}
@@ -1587,6 +1631,23 @@ def admin_dashboard():
                 background: #cc0000;
                 transform: scale(1.05);
             }
+            .back-btn {
+                background: #6c757d;
+                color: white;
+                border: none;
+                padding: 10px 20px;
+                border-radius: 8px;
+                text-decoration: none;
+                display: inline-flex;
+                align-items: center;
+                gap: 8px;
+                margin: 10px 0;
+                cursor: pointer;
+                transition: all 0.3s ease;
+            }
+            .back-btn:hover {
+                background: #5a6268;
+            }
             @media (max-width: 768px) {
                 .admin-container {
                     padding: 15px;
@@ -1606,9 +1667,14 @@ def admin_dashboard():
         <div class="admin-container">
             <div class="admin-header">
                 <h1><i class="fas fa-cogs"></i> لوحة التحكم</h1>
-                <a href="{{ url_for('admin_logout') }}" class="logout-btn">
-                    <i class="fas fa-sign-out-alt"></i> تسجيل الخروج
-                </a>
+                <div>
+                    <a href="{{ url_for('main') }}" class="back-btn" style="margin-right: 10px;">
+                        <i class="fas fa-arrow-right"></i> رجوع
+                    </a>
+                    <a href="{{ url_for('admin_logout') }}" class="logout-btn">
+                        <i class="fas fa-sign-out-alt"></i> تسجيل الخروج
+                    </a>
+                </div>
             </div>
             {% with messages = get_flashed_messages(with_categories=true) %}
                 {% if messages %}
@@ -1718,6 +1784,7 @@ def delete_file():
         flash(f'حدث خطأ أثناء الحذف: {str(e)}', 'error')
 
     return redirect(url_for('admin_dashboard'))
+
 @app.route('/admin/logout')
 @admin_required
 def admin_logout():
@@ -1728,19 +1795,6 @@ def admin_logout():
 @bot.message_handler(commands=['start'])
 def start_command(message):
     try:
-        # التحقق من بيانات المستخدم
-        user = message.from_user
-        user_info = {
-            'id': user.id,
-            'first_name': user.first_name,
-            'last_name': user.last_name or '',
-            'username': user.username or '',
-            'photo_url': f"https://api.dicebear.com/7.x/avataaars/svg?seed={user.id}"
-        }
-        
-        # حفظ المستخدم في قاعدة البيانات
-        save_user_info(user_info)
-        
         # إنشاء زر Web App
         keyboard = InlineKeyboardMarkup()
         
@@ -1748,40 +1802,84 @@ def start_command(message):
         web_app_url = "https://test-bgei.onrender.com"  # ⚠️ غير هذا بالرابط الحقيقي
         
         web_app_button = InlineKeyboardButton(
-            "🚀 فتح التطبيق المجاني", 
+            "🚀 فتح التطبيق", 
             web_app=WebAppInfo(url=web_app_url)
         )
-        keyboard.add(web_app_button)
         
-        welcome_text = f"""
-        🎉 أهلاً بك {user.first_name} في بوت الإعدادات المجانية!
-
-        👤 **معلومات حسابك:**
-        • الاسم: {user.first_name} {user.last_name or ''}
-        • المستخدم: @{user.username or 'غير متوفر'}
-        • رقم التعريف: {user.id}
-
-        🔓 **المميزات المتاحة:**
-        • تحميل إعدادات VPN مجانية
-        • تطبيقات متميزة مجانية
-        • خوادم سريعة ومستقرة
-        • تحديثات دورية للملفات
-
-        📱 **للبدء، اضغط على الزر أدناه لفتح التطبيق:**
-        """
-        
-        bot.send_message(
-            message.chat.id,
-            welcome_text,
-            reply_markup=keyboard,
-            parse_mode='Markdown'
+        stats_button = InlineKeyboardButton(
+            "📊 إحصائياتي",
+            callback_data="stats"
         )
         
-        print(f"✅ Sent WebApp button to user {user.id} ({user.first_name})")
+        keyboard.add(web_app_button)
+        keyboard.add(stats_button)
+        
+        welcome_text = """
+        🎉 **أهلاً بك في بوت الإعدادات المجانية!**
+
+        🔓 **من خلال هذا البوت يمكنك:**
+        • 📥 تحميل إعدادات VPN مجانية
+        • ⚡ الحصول على تطبيقات متميزة
+        • 🚀 خوادم سريعة ومستقرة
+        • 🔒 تشفير آمن وحماية كاملة
+
+        📱 **اضغط على الزر أدناه لفتح التطبيق والبدء:**
+        
+        ⚠️ **ملاحظة:** يجب فتح التطبيق عبر الزر المخصص للحصول على أفضل تجربة
+        """
+        
+        # إرسال صورة ترحيبية مع الأزرار
+        try:
+            bot.send_photo(
+                message.chat.id,
+                photo="https://via.placeholder.com/400x200/0a192f/ffffff?text=FREE+VPN+CONFIGS",
+                caption=welcome_text,
+                reply_markup=keyboard,
+                parse_mode="Markdown"
+            )
+        except:
+            # إذا فشل إرسال الصورة، أرسل الرسالة فقط
+            bot.send_message(
+                message.chat.id,
+                welcome_text,
+                reply_markup=keyboard,
+                parse_mode="Markdown"
+            )
+        
+        print(f"Sent WebApp button to user {message.from_user.id}")
         
     except Exception as e:
-        print(f"❌ Error in start command: {e}")
-        bot.send_message(message.chat.id, "❌ حدث خطأ أثناء تحميل البوت. يرجى المحاولة مرة أخرى.")
+        print(f"Error in start command: {e}")
+
+@bot.callback_query_handler(func=lambda call: call.data == "stats")
+def stats_callback(call):
+    try:
+        user_info = get_user_info(call.from_user.id)
+        if user_info:
+            stats_text = f"""
+            📊 **إحصائياتك الشخصية**
+
+            👤 **الاسم:** {user_info[2]} {user_info[3]}
+            📧 **المستخدم:** @{user_info[4] if user_info[4] else 'لا يوجد'}
+            📥 **عدد التنزيلات:** {user_info[7]}
+            🕒 **آخر تنزيل:** {user_info[6] if user_info[6] else 'لم تقم بأي تنزيل بعد'}
+
+            🔓 **استمر في استخدام التطبيق لتحميل المزيد!**
+            """
+        else:
+            stats_text = """
+            ❌ **لم نعثر على بياناتك!**
+            
+            🔧 **الحل:**
+            1. اضغط على زر 'فتح التطبيق' 
+            2. سجل الدخول تلقائياً
+            3. عد هنا وشاهد إحصائياتك
+            """
+        
+        bot.answer_callback_query(call.id)
+        bot.send_message(call.message.chat.id, stats_text, parse_mode="Markdown")
+    except Exception as e:
+        print(f"Error in stats callback: {e}")
 
 @bot.message_handler(commands=['stats'])
 def stats_command(message):
@@ -1791,82 +1889,49 @@ def stats_command(message):
             stats_text = f"""
             📊 **إحصائياتك الشخصية**
 
-            👤 **المعلومات الشخصية:**
-            • الاسم: {user_info[2]} {user_info[3]}
-            • المستخدم: @{user_info[4] if user_info[4] else 'غير متوفر'}
-            • رقم التعريف: {user_info[1]}
+            👤 **الاسم:** {user_info[2]} {user_info[3]}
+            📧 **المستخدم:** @{user_info[4] if user_info[4] else 'لا يوجد'}
+            📥 **عدد التنزيلات:** {user_info[7]}
+            🕒 **آخر تنزيل:** {user_info[6] if user_info[6] else 'لم تقم بأي تنزيل بعد'}
 
-            📥 **إحصائيات التنزيل:**
-            • عدد التنزيلات: {user_info[7]}
-            • آخر تنزيل: {user_info[6] if user_info[6] else 'لم تقم بأي تنزيل بعد'}
-
-            🎯 **لتحميل المزيد من الملفات، استخدم الزر في الأعلى!**
+            🔓 **استمر في استخدام التطبيق لتحميل المزيد!**
             """
         else:
             stats_text = """
             ❌ **لم نعثر على بياناتك!**
             
-            🔧 **لحل المشكلة:**
-            1. اضغط على زر 'فتح التطبيق المجاني'
-            2. سيتم تسجيل دخولك تلقائياً
+            🔧 **الحل:**
+            1. اضغط على زر 'فتح التطبيق' 
+            2. سجل الدخول تلقائياً
             3. عد هنا وشاهد إحصائياتك
-            
-            📱 **أو أرسل /start لتحديث بياناتك**
             """
         
-        bot.send_message(message.chat.id, stats_text, parse_mode='Markdown')
-        
+        bot.send_message(message.chat.id, stats_text, parse_mode="Markdown")
     except Exception as e:
-        print(f"❌ Error in stats command: {e}")
-        bot.send_message(message.chat.id, "❌ حدث خطأ أثناء جلب الإحصائيات.")
-
-@bot.message_handler(commands=['help'])
-def help_command(message):
-    help_text = """
-    🆘 **مركز المساعدة**
-
-    📋 **الأوامر المتاحة:**
-    • /start - بدء استخدام البوت وعرض زر التطبيق
-    • /stats - عرض إحصائياتك الشخصية
-    • /help - عرض هذه الرسالة
-
-    🔧 **استكشاف الأخطاء:**
-    • إذا لم يعمل التطبيق، تأكد من فتحه من خلال الزر
-    • للتحديث، أرسل /start مرة أخرى
-    • للمساعدة الفورية، راسل الدعم الفني
-
-    📞 **الدعم الفني:**
-    @dis102 - قناة التليجرام الرسمية
-    """
-    
-    bot.send_message(message.chat.id, help_text, parse_mode='Markdown')
+        print(f"Error in stats command: {e}")
 
 def run_bot():
     try:
-        print("🤖 جاري تشغيل بوت التليجرام...")
+        print("🤖 Starting Telegram Bot...")
+        # احصل على معلومات البوت
         bot_info = bot.get_me()
-        print(f"✅ تم تشغيل البوت بنجاح: @{bot_info.username}")
-        print(f"🆔 رقم البوت: {bot_info.id}")
-        print(f"👤 اسم البوت: {bot_info.first_name}")
+        print(f"✅ Bot @{bot_info.username} is running!")
         
-        bot.infinity_polling(timeout=60, long_polling_timeout=60)
-        
+        bot.infinity_polling()
     except Exception as e:
-        print(f"❌ خطأ في تشغيل البوت: {e}")
+        print(f"❌ Bot error: {e}")
         import time
         time.sleep(10)
-        print("🔄 إعادة تشغيل البوت...")
         run_bot()
 
 # تشغيل البوت في thread منفصل
 try:
     bot_thread = Thread(target=run_bot, daemon=True)
     bot_thread.start()
-    print("✅ تم تشغيل thread البوت بنجاح")
+    print("✅ Bot thread started successfully")
 except Exception as e:
-    print(f"❌ خطأ في تشغيل thread البوت: {e}")
+    print(f"❌ Error starting bot thread: {e}")
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
-    print(f"🚀 جاري تشغيل التطبيق على المنفذ {port}")
     app.run(host='0.0.0.0', port=port, debug=False)
