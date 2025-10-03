@@ -179,7 +179,7 @@ def index():
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>FREE INTERNET 🔐</title>
+        <title>FREE INTERNET🔌</title>
         <script src="https://telegram.org/js/telegram-web-app.js"></script>
         <style>
             body {
@@ -200,7 +200,7 @@ def index():
                 border-radius: 20px;
                 max-width: 500px;
                 border: 2px solid #ff6b00;
-                box-shadow: 0 10px 30px rgba(255, 107, 0, 0.3);
+                box-shadow: 0 10px 30px rgba(255, 107, 0, 0.1);
             }
             .loading {
                 font-size: 1.3rem;
@@ -236,7 +236,7 @@ def index():
     </head>
     <body>
         <div class="container">
-            <h1>🛡️ FREE INTERNET 🔐</h1>
+            <h1> FREE INTERNET🔌</h1>
             <div class="spinner"></div>
             <div class="loading">🔄 جاري التحميل والتحقق من الهوية...</div>
             <div class="status" id="status">
@@ -360,7 +360,7 @@ def main():
         <meta name="theme-color" content="#0a192f">
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>FREE INTERNET 🔐</title>
+        <title>FREE INTERNET DZ</title>
         <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@300&display=swap" rel="stylesheet">
         <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
         <meta name="robots" content="noindex,nofollow">
@@ -893,7 +893,7 @@ def main():
                 <i class="music-icon fas fa-music"></i>
             </button>
             
-            <button class="back-btn" onclick="goBack()" style="position: absolute; top: 5px; right: 50px;">
+            <button class="back-btn" onclick="goBack()" style="position: absolute; top: 1px; right: 90px;">
                 <i class="fas fa-arrow-right"></i> رجوع
             </button>
             
@@ -1050,7 +1050,7 @@ def main():
                             document.getElementById('downloadModal').style.display = 'none';
                             document.querySelector('.overlay').style.display = 'none';
                             // إظهار إشعار النجاح
-                            showNotification('تم إرسال الملف بنجاح!', 'success');
+                            showNotification('تم إرسال الملف بنجاح', 'success');
                             // تحديث الصفحة بعد ثانيتين
                             setTimeout(() => {
                                 window.location.reload();
@@ -1182,7 +1182,7 @@ def download(config_type, filename):
                 bot.send_document(
                     session['telegram_id'],
                     file,
-                    caption=f"📁 {filename}\n\nتم التنزيل بنجاح! ✅\n\nشكراً لاستخدامك خدمتنا 🚀"
+                    caption=f"<b>📁 تم التنزيل بنجاح ✅ 🚀</b>"
                 )
             return "تم إرسال الملف بنجاح عبر البوت! ✅"
         else:
@@ -1642,6 +1642,54 @@ def admin_dashboard():
             .back-btn:hover {
                 background: #5a6268;
             }
+            #uploadProgress {
+                display: none;
+                margin-top: 20px;
+                }
+             
+             .progress-container {
+                margin: 15px 0;
+                background: rgba(255, 107, 0, 0.1);
+                border-radius: 8px;
+                height: 20px;
+                overflow: hidden;
+                position: relative;
+                border: 1px solid rgba(255, 107, 0, 0.3);
+            }
+            .progress-bar {
+                height: 100%;
+                background: linear-gradient(90deg,
+                    rgba(255, 107, 0, 0.8) 0%,
+                    rgba(255, 140, 0, 0.8) 100%);
+                transition: width 0.3s ease;
+                position: relative;
+            }
+            
+            .upload-info {
+                display: flex;
+                justify-content: space-between;
+                margin-top: 10px;
+                font-size: 0.9em;
+                color: #ff8c00;
+            }
+            .progress-bar::after {
+                content: '';
+                position: absolute;
+                top: 0;
+                left: 0;
+                right: 0;
+                bottom: 0;
+                background: linear-gradient(90deg,
+                    transparent 0%,
+                    rgba(255,255,255,0.1) 50%,
+                    transparent 100%);
+                animation: progress-glow 2s infinite;
+            }
+            @keyframes progress-glow {
+                0% { transform: translateX(-100%); }
+                100% { transform: translateX(100%); }
+            }
+                      
             @media (max-width: 768px) {
                 .admin-container {
                     padding: 15px;
@@ -1704,6 +1752,15 @@ def admin_dashboard():
                         <i class="fas fa-upload"></i> رفع الملف
                     </button>
                 </form>
+                <div id="uploadProgress">
+                    <div class="progress-container">
+                        <div id="progressBar" class="progress-bar" style="width: 0%"></div>
+                    </div>
+                    <div class="upload-info">
+                        <span id="progressText">0%</span>
+                        <span id="timeInfo">الوقت المنقضي: 0s</span>
+                    </div>
+                </div>
             </div>
             <div class="files-section">
                 <h2 style="color: #ff6b00; margin-top: 30px;"><i class="fas fa-files"></i> الملفات المرفوعة</h2>
@@ -1743,6 +1800,44 @@ def admin_dashboard():
                 {% endfor %}
             </div>
         </div>
+        <script>
+            document.getElementById('uploadForm').addEventListener('submit', function(e) {
+                e.preventDefault();
+                const formData = new FormData(this);
+                const xhr = new XMLHttpRequest();
+                const startTime = Date.now();
+                const progressBar = document.getElementById('progressBar');
+                const progressText = document.getElementById('progressText');
+                const timeInfo = document.getElementById('timeInfo');
+                const uploadProgress = document.getElementById('uploadProgress');
+                const uploadButton = document.getElementById('uploadButton');
+                uploadProgress.style.display = 'block';
+                uploadButton.disabled = true;
+                uploadButton.innerHTML = '<i class="fas fa-spinner fa-spin"></i> جاري الرفع...🚀';
+                xhr.upload.addEventListener('progress', function(e) {
+                    if (e.lengthComputable) {
+                        const percent = Math.round((e.loaded / e.total) * 100);
+                        progressBar.style.width = percent + '%';
+                        progressText.textContent = percent + '%';
+                        const elapsed = Math.floor((Date.now() - startTime) / 1000);
+                        timeInfo.textContent = `الوقت المنقضي: ${elapsed}s`;
+                    }
+                });
+                xhr.onreadystatechange = function() {
+                    if (xhr.readyState === XMLHttpRequest.DONE) {
+                        uploadButton.disabled = false;
+                        uploadButton.innerHTML = '<i class="fas fa-upload"></i> رفع الملف';
+                        if (xhr.status === 200) {
+                            setTimeout(() => window.location.reload(), 1000);
+                        } else {
+                            alert('فشل الرفع: ' + xhr.statusText);
+                        }
+                    }
+                };
+                xhr.open('POST', '/admin/dashboard');
+                xhr.send(formData);
+            });
+        </script>
     </body>
     </html>
     ''', config_types=CONFIG_TYPES, config_files=config_files, protection_script=template_protection_script)
@@ -1821,8 +1916,8 @@ def start_command(message):
         keyboard.add(web_app_button)
         keyboard.add(stats_button)
         
-        welcome_text = f"""
-        🎉 أهلاً بك {user.first_name} في بوت الإعدادات المجانية!
+        welcome_text = f"""<b>
+        🎉 أهلاً بك {user.first_name} في بوت الإعدادات المجانية
 
         👤 **معلومات حسابك:**
         • الاسم: {user.first_name} {user.last_name or ''}
@@ -1836,7 +1931,7 @@ def start_command(message):
         • تحديثات دورية للملفات
 
         📱 **للبدء، اضغط على الزر أدناه لفتح التطبيق:**
-        """
+       </b> """
         
         # إرسال صورة ترحيبية مع الأزرار
         try:
@@ -1867,15 +1962,15 @@ def stats_callback(call):
         user_info = get_user_info(call.from_user.id)
         if user_info:
             stats_text = f"""
-            📊 **إحصائياتك الشخصية**
+<b>            📊 **إحصائياتك الشخصية**
 
             👤 **الاسم:** {user_info[2]} {user_info[3]}
             📧 **المستخدم:** @{user_info[4] if user_info[4] else 'لا يوجد'}
             📥 **عدد التنزيلات:** {user_info[7]}
             🕒 **آخر تنزيل:** {user_info[6] if user_info[6] else 'لم تقم بأي تنزيل بعد'}
 
-            🔓 **استمر في استخدام التطبيق لتحميل المزيد!**
-            """
+            🔓 **استمر في استخدام التطبيق لتحميل المزيد**
+           </b> """
         else:
             stats_text = """
             ❌ **لم نعثر على بياناتك!**
@@ -1897,18 +1992,18 @@ def stats_command(message):
         user_info = get_user_info(message.from_user.id)
         if user_info:
             stats_text = f"""
-            📊 **إحصائياتك الشخصية**
+<b>            📊 **إحصائياتك الشخصية**
 
             👤 **الاسم:** {user_info[2]} {user_info[3]}
             📧 **المستخدم:** @{user_info[4] if user_info[4] else 'لا يوجد'}
             📥 **عدد التنزيلات:** {user_info[7]}
             🕒 **آخر تنزيل:** {user_info[6] if user_info[6] else 'لم تقم بأي تنزيل بعد'}
 
-            🔓 **استمر في استخدام التطبيق لتحميل المزيد!**
-            """
+            🔓 **استمر في استخدام التطبيق لتحميل المزيد**
+            </b>"""
         else:
             stats_text = """
-            ❌ **لم نعثر على بياناتك!**
+            ❌ **لم نعثر على بياناتك**
             
             🔧 **الحل:**
             1. اضغط على زر 'فتح التطبيق' 
