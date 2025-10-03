@@ -893,7 +893,7 @@ def main():
                 <i class="music-icon fas fa-music"></i>
             </button>
             
-            <button class="back-btn" onclick="goBack()" style="position: absolute; top: 1px; right: 90px;">
+            <button class="back-btn" onclick="goBack()" style="position: absolute; top: 20px; right: 0px;">
                 <i class="fas fa-arrow-right"></i> رجوع
             </button>
             
@@ -1182,7 +1182,7 @@ def download(config_type, filename):
                 bot.send_document(
                     session['telegram_id'],
                     file,
-                    caption=f"<b>📁 تم التنزيل بنجاح ✅ 🚀</b>"
+                    caption=f"🦋"
                 )
             return "تم إرسال الملف بنجاح عبر البوت! ✅"
         else:
@@ -1876,7 +1876,7 @@ def start_command(message):
         keyboard = InlineKeyboardMarkup()
         
         # استخدم رابط التطبيق الحقيقي هنا
-        web_app_url = "https://test-bgei.onrender.com"  # ⚠️ غير هذا بالرابط الحقيقي
+        web_app_url = "https://test-bgei.onrender.com/"  # ⚠️ غير هذا بالرابط الحقيقي
         
         web_app_button = InlineKeyboardButton(
             "🚀 فتح التطبيق", 
