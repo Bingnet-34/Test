@@ -31,6 +31,7 @@ for config_type in CONFIG_TYPES:
 # ملفات JSON للتخزين
 USERS_JSON = os.path.join(BASE_DIR, 'users.json')
 FILES_JSON = os.path.join(BASE_DIR, 'files.json')
+SESSIONS_JSON = os.path.join(BASE_DIR, 'sessions.json')
 
 # قفل للتعامل الآمن مع الملفات
 json_lock = Lock()
@@ -67,6 +68,10 @@ def init_json_storage():
         if not os.path.exists(FILES_JSON):
             with open(FILES_JSON, 'w', encoding='utf-8') as f:
                 json.dump({}, f, ensure_ascii=False, indent=2)
+        
+        if not os.path.exists(SESSIONS_JSON):
+            with open(SESSIONS_JSON, 'w', encoding='utf-8') as f:
+                json.dump({}, f, ensure_ascii=False, indent=2)
 
 def read_users():
     """قراءة بيانات المستخدمين من ملف JSON"""
@@ -83,20 +88,20 @@ def write_users(users_data):
         with open(USERS_JSON, 'w', encoding='utf-8') as f:
             json.dump(users_data, f, ensure_ascii=False, indent=2)
 
-def read_files():
-    """قراءة بيانات الملفات من ملف JSON"""
+def read_sessions():
+    """قراءة بيانات الجلسات من ملف JSON"""
     with json_lock:
         try:
-            with open(FILES_JSON, 'r', encoding='utf-8') as f:
+            with open(SESSIONS_JSON, 'r', encoding='utf-8') as f:
                 return json.load(f)
         except (FileNotFoundError, json.JSONDecodeError):
             return {}
 
-def write_files(files_data):
-    """كتابة بيانات الملفات إلى ملف JSON"""
+def write_sessions(sessions_data):
+    """كتابة بيانات الجلسات إلى ملف JSON"""
     with json_lock:
-        with open(FILES_JSON, 'w', encoding='utf-8') as f:
-            json.dump(files_data, f, ensure_ascii=False, indent=2)
+        with open(SESSIONS_JSON, 'w', encoding='utf-8') as f:
+            json.dump(sessions_data, f, ensure_ascii=False, indent=2)
 
 def get_user_info(telegram_id):
     """الحصول على معلومات المستخدم"""
@@ -143,6 +148,84 @@ def update_user_download(telegram_id, filename):
 def get_all_users():
     """الحصول على جميع المستخدمين (للوحة الإدارة)"""
     return read_users()
+
+# إدارة الجلسات المحسنة
+def create_user_session(user_data):
+    """إنشاء جلسة جديدة للمستخدم"""
+    sessions = read_sessions()
+    telegram_id = str(user_data['id'])
+    
+    # إنشاء معرف جلسة فريد
+    session_id = secrets.token_urlsafe(32)
+    
+    sessions[session_id] = {
+        'telegram_id': telegram_id,
+        'created_at': datetime.now().isoformat(),
+        'last_activity': datetime.now().isoformat(),
+        'user_agent': request.headers.get('User-Agent', ''),
+        'ip_address': request.remote_addr
+    }
+    
+    write_sessions(sessions)
+    
+    # تخزين بيانات الجلسة في session flask
+    session.clear()
+    session['session_id'] = session_id
+    session['telegram_id'] = telegram_id
+    session['first_name'] = user_data['first_name']
+    session['last_name'] = user_data.get('last_name', '')
+    session['username'] = user_data.get('username', '')
+    session['photo_url'] = user_data.get('photo_url', f"https://api.dicebear.com/7.x/bottts/svg?seed={user_data['id']}")
+    session.permanent = True
+    
+    return session_id
+
+def validate_user_session():
+    """التحقق من صحة جلسة المستخدم"""
+    if not session.get('session_id') or not session.get('telegram_id'):
+        return False
+    
+    sessions = read_sessions()
+    session_id = session.get('session_id')
+    telegram_id = session.get('telegram_id')
+    
+    # التحقق من وجود الجلسة في السجلات
+    if session_id not in sessions:
+        return False
+    
+    session_data = sessions[session_id]
+    
+    # التحقق من تطابق معرف المستخدم
+    if session_data.get('telegram_id') != telegram_id:
+        return False
+    
+    # التحقق من أن المستخدم لا يزال موجوداً
+    user_info = get_user_info(telegram_id)
+    if not user_info:
+        return False
+    
+    # تحديث وقت النشاط الأخير
+    session_data['last_activity'] = datetime.now().isoformat()
+    sessions[session_id] = session_data
+    write_sessions(sessions)
+    
+    return True
+
+def cleanup_expired_sessions():
+    """تنظيف الجلسات المنتهية الصلاحية (أكثر من 24 ساعة)"""
+    sessions = read_sessions()
+    current_time = datetime.now()
+    expired_sessions = []
+    
+    for session_id, session_data in sessions.items():
+        created_at = datetime.fromisoformat(session_data['created_at'])
+        if (current_time - created_at).total_seconds() > 24 * 60 * 60:  # 24 ساعة
+            expired_sessions.append(session_id)
+    
+    for session_id in expired_sessions:
+        del sessions[session_id]
+    
+    write_sessions(sessions)
 
 # تهيئة التخزين
 init_json_storage()
@@ -205,45 +288,11 @@ def show_notification(message, type='success'):
     </script>
     """
 
-# دالة جديدة للتحقق من صحة الجلسة
-def validate_session():
-    """التحقق من أن الجلسة صالحة ولم يتم العبث بها"""
-    if not session.get('telegram_id'):
-        return False
-    
-    # التحقق من أن بيانات الجلسة متسقة
-    required_fields = ['telegram_id', 'first_name', 'session_token']
-    for field in required_fields:
-        if field not in session:
-            return False
-    
-    # التحقق من أن المستخدم موجود في قاعدة البيانات
-    user_info = get_user_info(session['telegram_id'])
-    if not user_info:
-        return False
-    
-    return True
-
-# دالة جديدة لإنشاء جلسة آمنة
-def create_secure_session(user_data):
-    """إنشاء جلسة آمنة جديدة"""
-    # مسح أي جلسة موجودة أولاً
-    session.clear()
-    
-    # حفظ بيانات المستخدم الأساسية
-    session['telegram_id'] = user_data['id']
-    session['first_name'] = user_data['first_name']
-    session['last_name'] = user_data.get('last_name', '')
-    session['username'] = user_data.get('username', '')
-    session['photo_url'] = user_data.get('photo_url', f"https://api.dicebear.com/7.x/bottts/svg?seed={user_data['id']}")
-    
-    # إنشاء token فريد للجلسة
-    session['session_token'] = secrets.token_urlsafe(32)
-    session['created_at'] = datetime.now().isoformat()
-    session.permanent = True
-
 @app.route('/')
 def index():
+    # تنظيف الجلسات المنتهية
+    cleanup_expired_sessions()
+    
     return render_template_string('''
     <!DOCTYPE html>
     <html lang="ar" dir="rtl">
@@ -320,6 +369,10 @@ def index():
             Telegram.WebApp.ready();
             Telegram.WebApp.expand();
 
+            // تنظيف التخزين المحلي للتأكد من جلسة جديدة
+            localStorage.removeItem('telegram_user_data');
+            sessionStorage.clear();
+
             // تحديث الحالة
             document.getElementById('status').innerHTML = '✅ تم تحميل Telegram WebApp<br>🔍 جاري استخراج بيانات المستخدم...';
 
@@ -330,13 +383,27 @@ def index():
                 console.log('User data:', user);
                 document.getElementById('status').innerHTML = '✅ تم العثور على بيانات المستخدم<br>📧 جاري تسجيل الدخول...';
                 
+                // التحقق من تغيير المستخدم
+                const previousUser = localStorage.getItem('current_telegram_id');
+                const currentUser = user.id.toString();
+                
+                if (previousUser && previousUser !== currentUser) {
+                    document.getElementById('status').innerHTML = '🔄 تم اكتشاف مستخدم جديد<br>🔧 جاري إعادة التعيين...';
+                    localStorage.removeItem('current_telegram_id');
+                    sessionStorage.clear();
+                }
+
+                // حفظ معرف المستخدم الحالي
+                localStorage.setItem('current_telegram_id', currentUser);
+                
                 // إنشاء بيانات المستخدم مع الصورة الحقيقية إذا كانت متاحة
                 const userData = {
                     id: user.id,
                     first_name: user.first_name,
                     last_name: user.last_name || '',
                     username: user.username || '',
-                    photo_url: user.photo_url || `https://api.dicebear.com/7.x/avataaars/svg?seed=${user.id}`
+                    photo_url: user.photo_url || `https://api.dicebear.com/7.x/avataaars/svg?seed=${user.id}`,
+                    session_reset: !previousUser || previousUser !== currentUser
                 };
 
                 // أرسل بيانات المستخدم إلى الخادم
@@ -393,11 +460,11 @@ def auth():
         if not user_data or 'id' not in user_data:
             return jsonify({'success': False, 'error': 'بيانات غير صالحة'})
         
-        # إنشاء جلسة آمنة جديدة
-        create_secure_session(user_data)
-        
         # حفظ في قاعدة البيانات
         save_user_info(user_data)
+        
+        # إنشاء جلسة جديدة للمستخدم
+        create_user_session(user_data)
         
         return jsonify({'success': True, 'message': 'تم إنشاء الجلسة بنجاح'})
         
@@ -407,8 +474,8 @@ def auth():
 
 @app.route('/main')
 def main():
-    # التحقق من صحة الجلسة أولاً
-    if not validate_session():
+    # التحقق من صحة جلسة المستخدم
+    if not validate_user_session():
         print(f"Session validation failed for session: {session}")
         return redirect('/')
     
@@ -1061,6 +1128,42 @@ def main():
         </div>
 
         <script>
+            // التحقق من تغيير المستخدم في الصفحة الرئيسية
+            function checkUserChange() {
+                const currentTelegramUser = Telegram.WebApp.initDataUnsafe.user;
+                if (currentTelegramUser) {
+                    const storedUserId = localStorage.getItem('current_telegram_id');
+                    const currentUserId = currentTelegramUser.id.toString();
+                    
+                    if (storedUserId && storedUserId !== currentUserId) {
+                        // تم اكتشاف مستخدم مختلف - إعادة تحميل الصفحة لإنشاء جلسة جديدة
+                        console.log('تم اكتشاف تغيير المستخدم، جاري إعادة التعيين...');
+                        localStorage.setItem('current_telegram_id', currentUserId);
+                        window.location.href = '/?force_refresh=' + Date.now();
+                        return false;
+                    }
+                }
+                return true;
+            }
+
+            // تنفيذ التحقق عند تحميل الصفحة
+            document.addEventListener('DOMContentLoaded', function() {
+                if (!checkUserChange()) {
+                    return;
+                }
+                
+                // متابعة التحميل العادي للصفحة
+                window.onload = function() {
+                    document.querySelector('.overlay').style.display = 'block';
+                    document.getElementById('welcomeModal').style.display = 'block';
+                    
+                    // إظهار رسالة ترحيب بعد تحميل الصفحة
+                    setTimeout(() => {
+                        showNotification('🎉 أهلاً بك {{ user_info.first_name }}! يمكنك الآن تحميل الإعدادات المجانية', 'success');
+                    }, 1500);
+                }
+            });
+
             function toggleFileList() {
                 var selectedType = document.getElementById("config-type").value;
                 var fileOptions = document.getElementById("file-options");
@@ -1095,6 +1198,11 @@ def main():
             }
 
             function downloadFile(configType, fileName) {
+                // التحقق من المستخدم أولاً
+                if (!checkUserChange()) {
+                    return;
+                }
+                
                 // إظهار نافذة التحميل
                 document.getElementById('downloadModal').style.display = 'block';
                 document.querySelector('.overlay').style.display = 'block';
@@ -1163,16 +1271,6 @@ def main():
 
             document.getElementById('currentYear').textContent = new Date().getFullYear();
 
-            window.onload = function() {
-                document.querySelector('.overlay').style.display = 'block';
-                document.getElementById('welcomeModal').style.display = 'block';
-                
-                // إظهار رسالة ترحيب بعد تحميل الصفحة
-                setTimeout(() => {
-                    showNotification('🎉 أهلاً بك {{ user_info.first_name }}! يمكنك الآن تحميل الإعدادات المجانية', 'success');
-                }, 1500);
-            }
-
             function closeModal() {
                 document.querySelector('.overlay').style.display = 'none';
                 document.getElementById('welcomeModal').style.display = 'none';
@@ -1226,8 +1324,8 @@ def get_config_files():
 
 @app.route('/download/<config_type>/<path:filename>')
 def download(config_type, filename):
-    # التحقق من صحة الجلسة أولاً
-    if not validate_session():
+    # التحقق من صحة جلسة المستخدم أولاً
+    if not validate_user_session():
         return "يجب تسجيل الدخول أولاً", 403
     
     directory = safe_join(DOWNLOAD_FOLDER, config_type)
@@ -2093,6 +2191,21 @@ try:
     print("✅ Bot thread started successfully")
 except Exception as e:
     print(f"❌ Error starting bot thread: {e}")
+
+
+# إضافة route لتسجيل الخروج
+@app.route('/logout')
+def logout():
+    """تسجيل خروج المستخدم ومسح الجلسة"""
+    if session.get('session_id'):
+        sessions = read_sessions()
+        session_id = session.get('session_id')
+        if session_id in sessions:
+            del sessions[session_id]
+            write_sessions(sessions)
+    
+    session.clear()
+    return redirect('/')
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
