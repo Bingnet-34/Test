@@ -1961,7 +1961,7 @@ def start_command(message):
         try:
             bot.send_photo(
                 message.chat.id,
-                photo="https://via.placeholder.com/400x200/0a192f/ffffff?text=FREE+VPN+CONFIGS",
+                photo="https://www.tech-mag.net/techmag/uploads/2024/02/smartphone-5623402_1280-1.jpg",
                 caption=welcome_text,
                 reply_markup=keyboard,
                 parse_mode="Markdown"
