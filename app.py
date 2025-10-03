@@ -893,7 +893,7 @@ def main():
                 <i class="music-icon fas fa-music"></i>
             </button>
             
-            <button class="back-btn" onclick="goBack()" style="position: absolute; top: 20px; right: 0px;">
+            <button class="back-btn" onclick="goBack()" style="position: absolute; top: 35px; right: 1px;">
                 <i class="fas fa-arrow-right"></i> رجوع
             </button>
             
