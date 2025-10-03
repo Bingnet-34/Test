@@ -1625,29 +1625,7 @@ def admin_dashboard():
                 background: #cc0000;
                 transform: scale(1.05);
             }
-            .back-btn {
-                background: #6c757d;
-                color: white;
-                border: none;
-                padding: 10px 20px;
-                border-radius: 8px;
-                text-decoration: none;
-                display: inline-flex;
-                align-items: center;
-                gap: 8px;
-                margin: 10px 0;
-                cursor: pointer;
-                transition: all 0.3s ease;
-            }
-            .back-btn:hover {
-                background: #5a6268;
-            }
-            #uploadProgress {
-                display: none;
-                margin-top: 20px;
-                }
-             
-             .progress-container {
+            .progress-container {
                 margin: 15px 0;
                 background: rgba(255, 107, 0, 0.1);
                 border-radius: 8px;
@@ -1663,14 +1641,6 @@ def admin_dashboard():
                     rgba(255, 140, 0, 0.8) 100%);
                 transition: width 0.3s ease;
                 position: relative;
-            }
-            
-            .upload-info {
-                display: flex;
-                justify-content: space-between;
-                margin-top: 10px;
-                font-size: 0.9em;
-                color: #ff8c00;
             }
             .progress-bar::after {
                 content: '';
@@ -1689,7 +1659,17 @@ def admin_dashboard():
                 0% { transform: translateX(-100%); }
                 100% { transform: translateX(100%); }
             }
-                      
+            .upload-info {
+                display: flex;
+                justify-content: space-between;
+                margin-top: 10px;
+                font-size: 0.9em;
+                color: #ff8c00;
+            }
+            #uploadProgress {
+                display: none;
+                margin-top: 20px;
+            }
             @media (max-width: 768px) {
                 .admin-container {
                     padding: 15px;
@@ -1709,14 +1689,9 @@ def admin_dashboard():
         <div class="admin-container">
             <div class="admin-header">
                 <h1><i class="fas fa-cogs"></i> لوحة التحكم</h1>
-                <div>
-                    <a href="{{ url_for('main') }}" class="back-btn" style="margin-right: 10px;">
-                        <i class="fas fa-arrow-right"></i> رجوع
-                    </a>
-                    <a href="{{ url_for('admin_logout') }}" class="logout-btn">
-                        <i class="fas fa-sign-out-alt"></i> تسجيل الخروج
-                    </a>
-                </div>
+                <a href="{{ url_for('admin_logout') }}" class="logout-btn">
+                    <i class="fas fa-sign-out-alt"></i> تسجيل الخروج
+                </a>
             </div>
             {% with messages = get_flashed_messages(with_categories=true) %}
                 {% if messages %}
@@ -1730,7 +1705,7 @@ def admin_dashboard():
             {% endwith %}
             <div class="upload-card">
                 <h2><i class="fas fa-cloud-upload-alt"></i> رفع ملف جديد</h2>
-                <form method="POST" enctype="multipart/form-data">
+                <form id="uploadForm" method="POST" enctype="multipart/form-data">
                     <div class="form-group">
                         <label for="config-type"><i class="fas fa-list"></i> نوع التطبيق</label>
                         <select id="config-type" name="config_type" required>
@@ -1748,7 +1723,7 @@ def admin_dashboard():
                         <label for="description"><i class="fas fa-file-alt"></i> وصف الملف</label>
                         <textarea id="description" name="description" placeholder="أدخل وصفاً للملف...">لا يوجد وصف متاح</textarea>
                     </div>
-                    <button type="submit" class="upload-btn">
+                    <button type="submit" class="upload-btn" id="uploadButton">
                         <i class="fas fa-upload"></i> رفع الملف
                     </button>
                 </form>
@@ -1916,7 +1891,7 @@ def start_command(message):
         keyboard.add(web_app_button)
         keyboard.add(stats_button)
         
-        welcome_text = f"""<b>
+        welcome_text = f"""
         🎉 أهلاً بك {user.first_name} في بوت الإعدادات المجانية
 
         👤 **معلومات حسابك:**
@@ -1924,14 +1899,14 @@ def start_command(message):
         • المستخدم: @{user.username or 'غير متوفر'}
         • رقم التعريف: {user.id}
 
-        🔓 **المميزات المتاحة:**
+        🔌 **المميزات المتاحة:**
         • تحميل إعدادات VPN مجانية
         • تطبيقات متميزة مجانية
         • خوادم سريعة ومستقرة
         • تحديثات دورية للملفات
 
         📱 **للبدء، اضغط على الزر أدناه لفتح التطبيق:**
-       </b> """
+        """
         
         # إرسال صورة ترحيبية مع الأزرار
         try:
@@ -1962,15 +1937,15 @@ def stats_callback(call):
         user_info = get_user_info(call.from_user.id)
         if user_info:
             stats_text = f"""
-<b>            📊 **إحصائياتك الشخصية**
+            📊 **إحصائياتك الشخصية**
 
             👤 **الاسم:** {user_info[2]} {user_info[3]}
             📧 **المستخدم:** @{user_info[4] if user_info[4] else 'لا يوجد'}
             📥 **عدد التنزيلات:** {user_info[7]}
             🕒 **آخر تنزيل:** {user_info[6] if user_info[6] else 'لم تقم بأي تنزيل بعد'}
 
-            🔓 **استمر في استخدام التطبيق لتحميل المزيد**
-           </b> """
+            🔌 **استمر في استخدام التطبيق لتحميل المزيد**
+           """
         else:
             stats_text = """
             ❌ **لم نعثر على بياناتك!**
@@ -1992,7 +1967,7 @@ def stats_command(message):
         user_info = get_user_info(message.from_user.id)
         if user_info:
             stats_text = f"""
-<b>            📊 **إحصائياتك الشخصية**
+            📊 **إحصائياتك الشخصية**
 
             👤 **الاسم:** {user_info[2]} {user_info[3]}
             📧 **المستخدم:** @{user_info[4] if user_info[4] else 'لا يوجد'}
@@ -2000,7 +1975,7 @@ def stats_command(message):
             🕒 **آخر تنزيل:** {user_info[6] if user_info[6] else 'لم تقم بأي تنزيل بعد'}
 
             🔓 **استمر في استخدام التطبيق لتحميل المزيد**
-            </b>"""
+            """
         else:
             stats_text = """
             ❌ **لم نعثر على بياناتك**
