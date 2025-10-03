@@ -171,6 +171,42 @@ def show_notification(message, type='success'):
     </script>
     """
 
+# دالة جديدة للتحقق من صحة الجلسة
+def validate_session():
+    """التحقق من أن الجلسة صالحة ولم يتم العبث بها"""
+    if not session.get('telegram_id'):
+        return False
+    
+    # التحقق من أن بيانات الجلسة متسقة
+    required_fields = ['telegram_id', 'first_name', 'session_token']
+    for field in required_fields:
+        if field not in session:
+            return False
+    
+    # التحقق من token الجلسة
+    expected_token = secrets.token_urlsafe(32)
+    if session.get('session_token') != expected_token:
+        return False
+    
+    return True
+
+# دالة جديدة لإنشاء جلسة آمنة
+def create_secure_session(user_data):
+    """إنشاء جلسة آمنة جديدة"""
+    session.clear()  # مسح أي جلسة موجودة
+    
+    # حفظ بيانات المستخدم الأساسية
+    session['telegram_id'] = user_data['id']
+    session['first_name'] = user_data['first_name']
+    session['last_name'] = user_data.get('last_name', '')
+    session['username'] = user_data.get('username', '')
+    session['photo_url'] = user_data.get('photo_url', f"https://api.dicebear.com/7.x/bottts/svg?seed={user_data['id']}")
+    
+    # إنشاء token فريد للجلسة
+    session['session_token'] = secrets.token_urlsafe(32)
+    session['created_at'] = datetime.now().isoformat()
+    session.permanent = True
+
 @app.route('/')
 def index():
     return render_template_string('''
@@ -286,15 +322,28 @@ def index():
                     } else {
                         document.getElementById('status').innerHTML = 
                             '❌ خطأ في المصادقة<br>' + (data.error || 'حدث خطأ غير معروف');
+                        // إعادة المحاولة بعد 3 ثواني
+                        setTimeout(() => {
+                            window.location.reload();
+                        }, 3000);
                     }
                 })
                 .catch(error => {
                     document.getElementById('status').innerHTML = 
                         '❌ خطأ في الاتصال<br>' + error;
+                    // إعادة المحاولة بعد 3 ثواني
+                    setTimeout(() => {
+                        window.location.reload();
+                    }, 3000);
                 });
             } else {
                 document.getElementById('status').innerHTML = 
                     '❌ لم يتم العثور على بيانات المستخدم<br>⚠️ يجب فتح التطبيق من خلال بوت تليجرام';
+                
+                // إعادة المحاولة بعد 3 ثواني
+                setTimeout(() => {
+                    window.location.reload();
+                }, 3000);
             }
         </script>
     </body>
@@ -309,13 +358,8 @@ def auth():
         if not user_data or 'id' not in user_data:
             return jsonify({'success': False, 'error': 'بيانات غير صالحة'})
         
-        # حفظ في الجلسة
-        session['telegram_id'] = user_data['id']
-        session['first_name'] = user_data['first_name']
-        session['last_name'] = user_data.get('last_name', '')
-        session['username'] = user_data.get('username', '')
-        session['photo_url'] = user_data.get('photo_url', f"https://api.dicebear.com/7.x/bottts/svg?seed={user_data['id']}")
-        session.permanent = True
+        # إنشاء جلسة آمنة جديدة
+        create_secure_session(user_data)
         
         # حفظ في قاعدة البيانات
         save_user_info(user_data)
@@ -327,23 +371,27 @@ def auth():
 
 @app.route('/main')
 def main():
+    # التحقق من صحة الجلسة أولاً
+    if not validate_session():
+        return redirect('/')
+    
     user_info = None
     
-    if session.get('telegram_id'):
-        user_db_info = get_user_info(session['telegram_id'])
-        if user_db_info:
-            last_download = user_db_info[6] if user_db_info[6] else 'لم يقم بتنزيل'
-            download_count = user_db_info[7] if user_db_info[7] else 0
-            
-            user_info = {
-                'id': session['telegram_id'],
-                'first_name': session.get('first_name', ''),
-                'last_name': session.get('last_name', ''),
-                'username': session.get('username', ''),
-                'photo_url': session.get('photo_url', 'https://api.dicebear.com/7.x/bottts/svg?seed=unknown'),
-                'last_download': last_download,
-                'download_count': download_count
-            }
+    # الحصول على بيانات المستخدم من قاعدة البيانات
+    user_db_info = get_user_info(session['telegram_id'])
+    if user_db_info:
+        last_download = user_db_info[6] if user_db_info[6] else 'لم يقم بتنزيل'
+        download_count = user_db_info[7] if user_db_info[7] else 0
+        
+        user_info = {
+            'id': session['telegram_id'],
+            'first_name': session.get('first_name', ''),
+            'last_name': session.get('last_name', ''),
+            'username': session.get('username', ''),
+            'photo_url': session.get('photo_url', 'https://api.dicebear.com/7.x/bottts/svg?seed=unknown'),
+            'last_download': last_download,
+            'download_count': download_count
+        }
     
     if not user_info:
         return redirect('/')
@@ -893,7 +941,7 @@ def main():
                 <i class="music-icon fas fa-music"></i>
             </button>
             
-            <button class="back-btn" onclick="goBack()" style="position: absolute; top: 35px; right: 1px;">
+            <button class="back-btn" onclick="goBack()" style="position: absolute; top: 20px; right: 0px;">
                 <i class="fas fa-arrow-right"></i> رجوع
             </button>
             
@@ -1166,7 +1214,8 @@ def get_config_files():
 
 @app.route('/download/<config_type>/<path:filename>')
 def download(config_type, filename):
-    if 'telegram_id' not in session:
+    # التحقق من صحة الجلسة أولاً
+    if not validate_session():
         return "يجب تسجيل الدخول أولاً", 403
     
     directory = safe_join(DOWNLOAD_FOLDER, config_type)
@@ -1876,7 +1925,7 @@ def start_command(message):
         keyboard = InlineKeyboardMarkup()
         
         # استخدم رابط التطبيق الحقيقي هنا
-        web_app_url = "https://test-bgei.onrender.com/"  # ⚠️ غير هذا بالرابط الحقيقي
+        web_app_url = "https://test-bgei.onrender.com"  # ⚠️ غير هذا بالرابط الحقيقي
         
         web_app_button = InlineKeyboardButton(
             "🚀 فتح التطبيق", 
@@ -1948,7 +1997,7 @@ def stats_callback(call):
            """
         else:
             stats_text = """
-            ❌ **لم نعثر على بياناتك!**
+            ❌ **لم نعثر على بياناتك**
             
             🔧 **الحل:**
             1. اضغط على زر 'فتح التطبيق' 
