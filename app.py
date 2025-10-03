@@ -1,10 +1,9 @@
 import os
 import secrets
-import sqlite3
 import json
 from datetime import datetime
 from functools import wraps
-from threading import Thread
+from threading import Thread, Lock
 from urllib.parse import parse_qs
 
 from flask import Flask, render_template_string, send_from_directory, request, redirect, url_for, session, flash, jsonify
@@ -29,6 +28,13 @@ ADMIN_CREDENTIALS = {'username': 'admin', 'password': 'admink123'}
 for config_type in CONFIG_TYPES:
     os.makedirs(os.path.join(DOWNLOAD_FOLDER, config_type), exist_ok=True)
 
+# ملفات JSON للتخزين
+USERS_JSON = os.path.join(BASE_DIR, 'users.json')
+FILES_JSON = os.path.join(BASE_DIR, 'files.json')
+
+# قفل للتعامل الآمن مع الملفات
+json_lock = Lock()
+
 # دالة لتحويل حجم الملف إلى صيغة قابلة للقراءة
 def human_readable_size(size):
     for unit in ['B', 'KB', 'MB', 'GB']:
@@ -50,68 +56,96 @@ def get_unique_filename(directory, original_name):
             return unique_name
         counter += 1
 
-# إنشاء قاعدة البيانات للمستخدمين
-def init_db():
-    conn = sqlite3.connect('users.db', check_same_thread=False)
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS users
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                 telegram_id INTEGER UNIQUE,
-                 first_name TEXT,
-                 last_name TEXT,
-                 username TEXT,
-                 photo_url TEXT,
-                 last_download TEXT,
-                 download_count INTEGER DEFAULT 0,
-                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-    conn.commit()
-    conn.close()
+# وظائف التعامل مع ملف JSON للمستخدمين
+def init_json_storage():
+    """تهيئة ملفات JSON إذا لم تكن موجودة"""
+    with json_lock:
+        if not os.path.exists(USERS_JSON):
+            with open(USERS_JSON, 'w', encoding='utf-8') as f:
+                json.dump({}, f, ensure_ascii=False, indent=2)
+        
+        if not os.path.exists(FILES_JSON):
+            with open(FILES_JSON, 'w', encoding='utf-8') as f:
+                json.dump({}, f, ensure_ascii=False, indent=2)
 
-init_db()
+def read_users():
+    """قراءة بيانات المستخدمين من ملف JSON"""
+    with json_lock:
+        try:
+            with open(USERS_JSON, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
+
+def write_users(users_data):
+    """كتابة بيانات المستخدمين إلى ملف JSON"""
+    with json_lock:
+        with open(USERS_JSON, 'w', encoding='utf-8') as f:
+            json.dump(users_data, f, ensure_ascii=False, indent=2)
+
+def read_files():
+    """قراءة بيانات الملفات من ملف JSON"""
+    with json_lock:
+        try:
+            with open(FILES_JSON, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
+
+def write_files(files_data):
+    """كتابة بيانات الملفات إلى ملف JSON"""
+    with json_lock:
+        with open(FILES_JSON, 'w', encoding='utf-8') as f:
+            json.dump(files_data, f, ensure_ascii=False, indent=2)
 
 def get_user_info(telegram_id):
-    conn = sqlite3.connect('users.db', check_same_thread=False)
-    c = conn.cursor()
-    c.execute("SELECT * FROM users WHERE telegram_id=?", (telegram_id,))
-    user = c.fetchone()
-    conn.close()
-    return user
+    """الحصول على معلومات المستخدم"""
+    users = read_users()
+    return users.get(str(telegram_id))
 
 def save_user_info(user_data):
-    conn = sqlite3.connect('users.db', check_same_thread=False)
-    c = conn.cursor()
+    """حفظ معلومات المستخدم"""
+    users = read_users()
+    telegram_id = str(user_data['id'])
     
-    c.execute("SELECT * FROM users WHERE telegram_id=?", (user_data['id'],))
-    existing_user = c.fetchone()
-    
-    if existing_user:
-        c.execute('''UPDATE users SET 
-                     first_name=?, last_name=?, username=?, photo_url=?
-                     WHERE telegram_id=?''',
-                 (user_data['first_name'], user_data['last_name'], 
-                  user_data['username'], user_data.get('photo_url', ''), user_data['id']))
+    if telegram_id not in users:
+        users[telegram_id] = {
+            'telegram_id': user_data['id'],
+            'first_name': user_data['first_name'],
+            'last_name': user_data.get('last_name', ''),
+            'username': user_data.get('username', ''),
+            'photo_url': user_data.get('photo_url', f"https://api.dicebear.com/7.x/bottts/svg?seed={user_data['id']}"),
+            'last_download': None,
+            'download_count': 0,
+            'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        }
     else:
-        photo_url = user_data.get('photo_url', f"https://api.dicebear.com/7.x/bottts/svg?seed={user_data['id']}")
-        c.execute('''INSERT INTO users 
-                     (telegram_id, first_name, last_name, username, photo_url, download_count) 
-                     VALUES (?, ?, ?, ?, ?, ?)''',
-                 (user_data['id'], user_data['first_name'], 
-                  user_data['last_name'], user_data['username'], 
-                  photo_url, 0))
+        # تحديث البيانات الأساسية فقط
+        users[telegram_id].update({
+            'first_name': user_data['first_name'],
+            'last_name': user_data.get('last_name', ''),
+            'username': user_data.get('username', ''),
+            'photo_url': user_data.get('photo_url', users[telegram_id].get('photo_url', f"https://api.dicebear.com/7.x/bottts/svg?seed={user_data['id']}"))
+        })
     
-    conn.commit()
-    conn.close()
+    write_users(users)
 
 def update_user_download(telegram_id, filename):
-    conn = sqlite3.connect('users.db', check_same_thread=False)
-    c = conn.cursor()
-    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    c.execute('''UPDATE users SET 
-                 last_download=?, download_count=download_count+1 
-                 WHERE telegram_id=?''',
-              (now, telegram_id))
-    conn.commit()
-    conn.close()
+    """تحديث إحصائيات تنزيل المستخدم"""
+    users = read_users()
+    telegram_id_str = str(telegram_id)
+    
+    if telegram_id_str in users:
+        users[telegram_id_str]['last_download'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        users[telegram_id_str]['download_count'] = users[telegram_id_str].get('download_count', 0) + 1
+        write_users(users)
+
+def get_all_users():
+    """الحصول على جميع المستخدمين (للوحة الإدارة)"""
+    return read_users()
+
+# تهيئة التخزين
+init_json_storage()
 
 def admin_required(f):
     @wraps(f)
@@ -383,15 +417,15 @@ def main():
     # الحصول على بيانات المستخدم من قاعدة البيانات
     user_db_info = get_user_info(session['telegram_id'])
     if user_db_info:
-        last_download = user_db_info[6] if user_db_info[6] else 'لم يقم بتنزيل'
-        download_count = user_db_info[7] if user_db_info[7] else 0
+        last_download = user_db_info.get('last_download', 'لم يقم بتنزيل')
+        download_count = user_db_info.get('download_count', 0)
         
         user_info = {
             'id': session['telegram_id'],
-            'first_name': session.get('first_name', ''),
-            'last_name': session.get('last_name', ''),
-            'username': session.get('username', ''),
-            'photo_url': session.get('photo_url', 'https://api.dicebear.com/7.x/bottts/svg?seed=unknown'),
+            'first_name': user_db_info.get('first_name', ''),
+            'last_name': user_db_info.get('last_name', ''),
+            'username': user_db_info.get('username', ''),
+            'photo_url': user_db_info.get('photo_url', 'https://api.dicebear.com/7.x/bottts/svg?seed=unknown'),
             'last_download': last_download,
             'download_count': download_count
         }
@@ -769,24 +803,6 @@ def main():
                 transform: scale(1.05);
                 box-shadow: 0 0 15px #ff8c00;
             }
-            .back-btn {
-                background: #6c757d;
-                color: white;
-                border: none;
-                padding: 10px 20px;
-                border-radius: 8px;
-                text-decoration: none;
-                display: inline-flex;
-                align-items: center;
-                gap: 8px;
-                margin: 10px 0;
-                cursor: pointer;
-                transition: all 0.3s ease;
-            }
-            .back-btn:hover {
-                background: #5a6268;
-                transform: translateX(-5px);
-            }
             .notification {
                 position: fixed;
                 top: 20px;
@@ -943,10 +959,6 @@ def main():
             
             <button id="toggle-music" onclick="toggleMusic()">
                 <i class="music-icon fas fa-music"></i>
-            </button>
-            
-            <button class="back-btn" onclick="goBack()" style="position: absolute; top: 35px; right: 1px;">
-                <i class="fas fa-arrow-right"></i> رجوع
             </button>
             
             <div class="user-section">
@@ -1149,10 +1161,6 @@ def main():
                 }
             }
 
-            function goBack() {
-                window.history.back();
-            }
-
             document.getElementById('currentYear').textContent = new Date().getFullYear();
 
             window.onload = function() {
@@ -1161,7 +1169,7 @@ def main():
                 
                 // إظهار رسالة ترحيب بعد تحميل الصفحة
                 setTimeout(() => {
-                    showNotification('🎉 أهلاً بك {{ user_info.first_name }} يمكنك الآن تحميل الإعدادات المجانية', 'success');
+                    showNotification('🎉 أهلاً بك {{ user_info.first_name }}! يمكنك الآن تحميل الإعدادات المجانية', 'success');
                 }, 1500);
             }
 
@@ -1470,6 +1478,11 @@ def admin_dashboard():
             except Exception as e:
                 flash(f'حدث خطأ أثناء رفع الملف: {str(e)}', 'error')
 
+    # الحصول على إحصائيات المستخدمين
+    users = get_all_users()
+    total_users = len(users)
+    total_downloads = sum(user.get('download_count', 0) for user in users.values())
+    
     return render_template_string('''
     <!DOCTYPE html>
     <html lang="ar" dir="rtl">
@@ -1490,7 +1503,7 @@ def admin_dashboard():
                 background-color:#0a192f;
             }
             .admin-container {
-                max-width: 800px;
+                max-width: 1200px;
                 margin: 0 auto;
                 padding: 20px;
                 background: rgba(0, 0, 0, 0.8);
@@ -1528,6 +1541,29 @@ def admin_dashboard():
             .logout-btn:hover {
                 background: #cc0000;
                 transform: translateY(-2px);
+            }
+            .stats-section {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+                gap: 20px;
+                margin-bottom: 30px;
+            }
+            .stat-card {
+                background: rgba(255, 107, 0, 0.1);
+                padding: 20px;
+                border-radius: 10px;
+                border: 1px solid rgba(255, 107, 0, 0.3);
+                text-align: center;
+            }
+            .stat-number {
+                font-size: 2rem;
+                font-weight: bold;
+                color: #ff8c00;
+                margin: 10px 0;
+            }
+            .stat-label {
+                font-size: 0.9rem;
+                color: #ccc;
             }
             .upload-card {
                 background: rgba(0, 0, 0, 0.5);
@@ -1678,50 +1714,27 @@ def admin_dashboard():
                 background: #cc0000;
                 transform: scale(1.05);
             }
-            .progress-container {
-                margin: 15px 0;
-                background: rgba(255, 107, 0, 0.1);
-                border-radius: 8px;
-                height: 20px;
-                overflow: hidden;
-                position: relative;
-                border: 1px solid rgba(255, 107, 0, 0.3);
+            .users-section {
+                margin-top: 30px;
             }
-            .progress-bar {
-                height: 100%;
-                background: linear-gradient(90deg,
-                    rgba(255, 107, 0, 0.8) 0%,
-                    rgba(255, 140, 0, 0.8) 100%);
-                transition: width 0.3s ease;
-                position: relative;
+            .users-table {
+                width: 100%;
+                border-collapse: collapse;
+                margin-top: 15px;
             }
-            .progress-bar::after {
-                content: '';
-                position: absolute;
-                top: 0;
-                left: 0;
-                right: 0;
-                bottom: 0;
-                background: linear-gradient(90deg,
-                    transparent 0%,
-                    rgba(255,255,255,0.1) 50%,
-                    transparent 100%);
-                animation: progress-glow 2s infinite;
+            .users-table th,
+            .users-table td {
+                padding: 12px;
+                text-align: right;
+                border-bottom: 1px solid rgba(255, 107, 0, 0.3);
             }
-            @keyframes progress-glow {
-                0% { transform: translateX(-100%); }
-                100% { transform: translateX(100%); }
-            }
-            .upload-info {
-                display: flex;
-                justify-content: space-between;
-                margin-top: 10px;
-                font-size: 0.9em;
+            .users-table th {
+                background: rgba(255, 107, 0, 0.2);
                 color: #ff8c00;
+                font-weight: bold;
             }
-            #uploadProgress {
-                display: none;
-                margin-top: 20px;
+            .users-table tr:hover {
+                background: rgba(255, 107, 0, 0.1);
             }
             @media (max-width: 768px) {
                 .admin-container {
@@ -1733,6 +1746,12 @@ def admin_dashboard():
                 }
                 .admin-header h1 {
                     font-size: 1.5rem;
+                }
+                .stats-section {
+                    grid-template-columns: 1fr;
+                }
+                .users-table {
+                    font-size: 0.8rem;
                 }
             }
         </style>
@@ -1746,6 +1765,26 @@ def admin_dashboard():
                     <i class="fas fa-sign-out-alt"></i> تسجيل الخروج
                 </a>
             </div>
+            
+            <!-- إحصائيات -->
+            <div class="stats-section">
+                <div class="stat-card">
+                    <div class="stat-label">إجمالي المستخدمين</div>
+                    <div class="stat-number">{{ total_users }}</div>
+                    <i class="fas fa-users"></i>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">إجمالي التنزيلات</div>
+                    <div class="stat-number">{{ total_downloads }}</div>
+                    <i class="fas fa-download"></i>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">أنواع الملفات</div>
+                    <div class="stat-number">{{ config_types|length }}</div>
+                    <i class="fas fa-folder"></i>
+                </div>
+            </div>
+            
             {% with messages = get_flashed_messages(with_categories=true) %}
                 {% if messages %}
                     {% for category, message in messages %}
@@ -1756,9 +1795,10 @@ def admin_dashboard():
                     {% endfor %}
                 {% endif %}
             {% endwith %}
+            
             <div class="upload-card">
                 <h2><i class="fas fa-cloud-upload-alt"></i> رفع ملف جديد</h2>
-                <form id="uploadForm" method="POST" enctype="multipart/form-data">
+                <form method="POST" enctype="multipart/form-data">
                     <div class="form-group">
                         <label for="config-type"><i class="fas fa-list"></i> نوع التطبيق</label>
                         <select id="config-type" name="config_type" required>
@@ -1776,20 +1816,12 @@ def admin_dashboard():
                         <label for="description"><i class="fas fa-file-alt"></i> وصف الملف</label>
                         <textarea id="description" name="description" placeholder="أدخل وصفاً للملف...">لا يوجد وصف متاح</textarea>
                     </div>
-                    <button type="submit" class="upload-btn" id="uploadButton">
+                    <button type="submit" class="upload-btn">
                         <i class="fas fa-upload"></i> رفع الملف
                     </button>
                 </form>
-                <div id="uploadProgress">
-                    <div class="progress-container">
-                        <div id="progressBar" class="progress-bar" style="width: 0%"></div>
-                    </div>
-                    <div class="upload-info">
-                        <span id="progressText">0%</span>
-                        <span id="timeInfo">الوقت المنقضي: 0s</span>
-                    </div>
-                </div>
             </div>
+            
             <div class="files-section">
                 <h2 style="color: #ff6b00; margin-top: 30px;"><i class="fas fa-files"></i> الملفات المرفوعة</h2>
                 {% for config_type, files in config_files.items() %}
@@ -1827,48 +1859,45 @@ def admin_dashboard():
                     </div>
                 {% endfor %}
             </div>
+            
+            <div class="users-section">
+                <h2 style="color: #ff6b00; margin-top: 30px;"><i class="fas fa-users"></i> إدارة المستخدمين</h2>
+                <div class="config-type-section">
+                    {% if users %}
+                        <table class="users-table">
+                            <thead>
+                                <tr>
+                                    <th>رقم التعريف</th>
+                                    <th>الاسم</th>
+                                    <th>المستخدم</th>
+                                    <th>عدد التنزيلات</th>
+                                    <th>آخر تنزيل</th>
+                                    <th>تاريخ التسجيل</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for user_id, user in users.items() %}
+                                <tr>
+                                    <td>{{ user_id }}</td>
+                                    <td>{{ user.first_name }} {{ user.last_name }}</td>
+                                    <td>@{{ user.username if user.username else 'لا يوجد' }}</td>
+                                    <td>{{ user.download_count }}</td>
+                                    <td>{{ user.last_download if user.last_download else 'لم يقم بتنزيل' }}</td>
+                                    <td>{{ user.created_at }}</td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    {% else %}
+                        <p>لا يوجد مستخدمين مسجلين بعد.</p>
+                    {% endif %}
+                </div>
+            </div>
         </div>
-        <script>
-            document.getElementById('uploadForm').addEventListener('submit', function(e) {
-                e.preventDefault();
-                const formData = new FormData(this);
-                const xhr = new XMLHttpRequest();
-                const startTime = Date.now();
-                const progressBar = document.getElementById('progressBar');
-                const progressText = document.getElementById('progressText');
-                const timeInfo = document.getElementById('timeInfo');
-                const uploadProgress = document.getElementById('uploadProgress');
-                const uploadButton = document.getElementById('uploadButton');
-                uploadProgress.style.display = 'block';
-                uploadButton.disabled = true;
-                uploadButton.innerHTML = '<i class="fas fa-spinner fa-spin"></i> جاري الرفع...🚀';
-                xhr.upload.addEventListener('progress', function(e) {
-                    if (e.lengthComputable) {
-                        const percent = Math.round((e.loaded / e.total) * 100);
-                        progressBar.style.width = percent + '%';
-                        progressText.textContent = percent + '%';
-                        const elapsed = Math.floor((Date.now() - startTime) / 1000);
-                        timeInfo.textContent = `الوقت المنقضي: ${elapsed}s`;
-                    }
-                });
-                xhr.onreadystatechange = function() {
-                    if (xhr.readyState === XMLHttpRequest.DONE) {
-                        uploadButton.disabled = false;
-                        uploadButton.innerHTML = '<i class="fas fa-upload"></i> رفع الملف';
-                        if (xhr.status === 200) {
-                            setTimeout(() => window.location.reload(), 1000);
-                        } else {
-                            alert('فشل الرفع: ' + xhr.statusText);
-                        }
-                    }
-                };
-                xhr.open('POST', '/admin/dashboard');
-                xhr.send(formData);
-            });
-        </script>
     </body>
     </html>
-    ''', config_types=CONFIG_TYPES, config_files=config_files, protection_script=template_protection_script)
+    ''', config_types=CONFIG_TYPES, config_files=config_files, users=users, 
+    total_users=total_users, total_downloads=total_downloads, protection_script=template_protection_script)
 
 @app.route('/admin/delete', methods=['POST'])
 @admin_required
@@ -1992,10 +2021,10 @@ def stats_callback(call):
             stats_text = f"""
             📊 **إحصائياتك الشخصية**
 
-            👤 **الاسم:** {user_info[2]} {user_info[3]}
-            📧 **المستخدم:** @{user_info[4] if user_info[4] else 'لا يوجد'}
-            📥 **عدد التنزيلات:** {user_info[7]}
-            🕒 **آخر تنزيل:** {user_info[6] if user_info[6] else 'لم تقم بأي تنزيل بعد'}
+            👤 **الاسم:** {user_info['first_name']} {user_info['last_name']}
+            📧 **المستخدم:** @{user_info['username'] if user_info['username'] else 'لا يوجد'}
+            📥 **عدد التنزيلات:** {user_info['download_count']}
+            🕒 **آخر تنزيل:** {user_info['last_download'] if user_info['last_download'] else 'لم تقم بأي تنزيل بعد'}
 
             🔌 **استمر في استخدام التطبيق لتحميل المزيد**
            """
@@ -2022,10 +2051,10 @@ def stats_command(message):
             stats_text = f"""
             📊 **إحصائياتك الشخصية**
 
-            👤 **الاسم:** {user_info[2]} {user_info[3]}
-            📧 **المستخدم:** @{user_info[4] if user_info[4] else 'لا يوجد'}
-            📥 **عدد التنزيلات:** {user_info[7]}
-            🕒 **آخر تنزيل:** {user_info[6] if user_info[6] else 'لم تقم بأي تنزيل بعد'}
+            👤 **الاسم:** {user_info['first_name']} {user_info['last_name']}
+            📧 **المستخدم:** @{user_info['username'] if user_info['username'] else 'لا يوجد'}
+            📥 **عدد التنزيلات:** {user_info['download_count']}
+            🕒 **آخر تنزيل:** {user_info['last_download'] if user_info['last_download'] else 'لم تقم بأي تنزيل بعد'}
 
             🔓 **استمر في استخدام التطبيق لتحميل المزيد**
             """
