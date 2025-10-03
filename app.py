@@ -183,9 +183,9 @@ def validate_session():
         if field not in session:
             return False
     
-    # التحقق من token الجلسة
-    expected_token = secrets.token_urlsafe(32)
-    if session.get('session_token') != expected_token:
+    # التحقق من أن المستخدم موجود في قاعدة البيانات
+    user_info = get_user_info(session['telegram_id'])
+    if not user_info:
         return False
     
     return True
@@ -193,7 +193,8 @@ def validate_session():
 # دالة جديدة لإنشاء جلسة آمنة
 def create_secure_session(user_data):
     """إنشاء جلسة آمنة جديدة"""
-    session.clear()  # مسح أي جلسة موجودة
+    # مسح أي جلسة موجودة أولاً
+    session.clear()
     
     # حفظ بيانات المستخدم الأساسية
     session['telegram_id'] = user_data['id']
@@ -364,15 +365,17 @@ def auth():
         # حفظ في قاعدة البيانات
         save_user_info(user_data)
         
-        return jsonify({'success': True})
+        return jsonify({'success': True, 'message': 'تم إنشاء الجلسة بنجاح'})
         
     except Exception as e:
+        print(f"Error in auth: {e}")
         return jsonify({'success': False, 'error': str(e)})
 
 @app.route('/main')
 def main():
     # التحقق من صحة الجلسة أولاً
     if not validate_session():
+        print(f"Session validation failed for session: {session}")
         return redirect('/')
     
     user_info = None
@@ -394,6 +397,7 @@ def main():
         }
     
     if not user_info:
+        print("User info not found, redirecting to index")
         return redirect('/')
     
     config_files = get_config_files()
