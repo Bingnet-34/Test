@@ -56,7 +56,7 @@ def get_unique_filename(directory, original_name):
             return unique_name
         counter += 1
 
-# نظام إدارة المستخدمين المبسط والفعال
+# نظام إدارة المستخدمين المحسن
 def init_json_storage():
     """تهيئة ملفات JSON إذا لم تكن موجودة"""
     with json_lock:
@@ -83,6 +83,21 @@ def write_users(users_data):
         with open(USERS_JSON, 'w', encoding='utf-8') as f:
             json.dump(users_data, f, ensure_ascii=False, indent=2)
 
+def read_files():
+    """قراءة بيانات الملفات من ملف JSON"""
+    with json_lock:
+        try:
+            with open(FILES_JSON, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
+
+def write_files(files_data):
+    """كتابة بيانات الملفات إلى ملف JSON"""
+    with json_lock:
+        with open(FILES_JSON, 'w', encoding='utf-8') as f:
+            json.dump(files_data, f, ensure_ascii=False, indent=2)
+
 def get_user_info(telegram_id):
     """الحصول على معلومات المستخدم"""
     users = read_users()
@@ -103,7 +118,8 @@ def save_user_info(user_data):
             'last_download': None,
             'download_count': 0,
             'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'last_login': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            'last_login': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'sessions': {}  # تخزين الجلسات النشطة
         }
     else:
         # تحديث البيانات الأساسية وآخر تسجيل دخول
@@ -130,6 +146,72 @@ def update_user_download(telegram_id, filename):
 def get_all_users():
     """الحصول على جميع المستخدمين (للوحة الإدارة)"""
     return read_users()
+
+# نظام الجلسات المحسن
+def create_user_session(telegram_id):
+    """إنشاء جلسة جديدة للمستخدم وإرجاع session_token"""
+    users = read_users()
+    telegram_id_str = str(telegram_id)
+    
+    if telegram_id_str not in users:
+        return None
+    
+    # إنشاء session_token فريد
+    session_token = secrets.token_urlsafe(32)
+    
+    # تخزين الجلسة في بيانات المستخدم
+    if 'sessions' not in users[telegram_id_str]:
+        users[telegram_id_str]['sessions'] = {}
+    
+    users[telegram_id_str]['sessions'][session_token] = {
+        'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'last_activity': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'user_agent': request.headers.get('User-Agent', '')[:200]
+    }
+    
+    # الاحتفاظ بحد أقصى 5 جلسات نشطة للمستخدم
+    if len(users[telegram_id_str]['sessions']) > 5:
+        # حذف أقدم جلسة
+        oldest_session = min(users[telegram_id_str]['sessions'].keys(), 
+                           key=lambda k: users[telegram_id_str]['sessions'][k]['created_at'])
+        del users[telegram_id_str]['sessions'][oldest_session]
+    
+    write_users(users)
+    return session_token
+
+def validate_user_session(telegram_id, session_token):
+    """التحقق من صحة جلسة المستخدم"""
+    users = read_users()
+    telegram_id_str = str(telegram_id)
+    
+    if (telegram_id_str not in users or 
+        'sessions' not in users[telegram_id_str] or
+        session_token not in users[telegram_id_str]['sessions']):
+        return False
+    
+    # تحديث آخر نشاط للجلسة
+    users[telegram_id_str]['sessions'][session_token]['last_activity'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    write_users(users)
+    
+    return True
+
+def cleanup_expired_sessions():
+    """تنظيف الجلسات المنتهية الصلاحية (أكثر من 7 أيام)"""
+    users = read_users()
+    current_time = datetime.now()
+    
+    for user_id, user_data in users.items():
+        if 'sessions' in user_data:
+            expired_sessions = []
+            for session_token, session_info in user_data['sessions'].items():
+                last_activity = datetime.strptime(session_info['last_activity'], '%Y-%m-%d %H:%M:%S')
+                if (current_time - last_activity).days > 7:
+                    expired_sessions.append(session_token)
+            
+            for session_token in expired_sessions:
+                del user_data['sessions'][session_token]
+    
+    write_users(users)
 
 # تهيئة التخزين
 init_json_storage()
@@ -170,20 +252,38 @@ template_protection_script = """
 </script>
 """
 
-# نظام المصادقة المبسط والفعال
+def show_notification(message, type='success'):
+    return f"""
+    <div class="notification notification-{type}" id="notification">
+        <div class="notification-content">
+            <i class="fas fa-{ 'check-circle' if type == 'success' else 'exclamation-circle' if type == 'warning' else 'info-circle' if type == 'info' else 'times-circle'}"></i>
+            <span>{message}</span>
+        </div>
+        <button class="notification-close" onclick="closeNotification()">
+            <i class="fas fa-times"></i>
+        </button>
+    </div>
+    <script>
+        function closeNotification() {{
+            document.getElementById('notification').style.display = 'none';
+        }}
+        setTimeout(() => {{
+            const notification = document.getElementById('notification');
+            if (notification) notification.style.display = 'none';
+        }}, 5000);
+    </script>
+    """
+
+# نظام المصادقة المحسن
 def validate_session():
-    """التحقق من صحة جلسة المستخدم - مبسط"""
+    """التحقق من صحة جلسة المستخدم"""
     telegram_id = session.get('telegram_id')
+    session_token = session.get('session_token')
     
-    if not telegram_id:
+    if not telegram_id or not session_token:
         return False
     
-    # التحقق من أن المستخدم موجود في قاعدة البيانات
-    user_info = get_user_info(telegram_id)
-    if not user_info:
-        return False
-    
-    return True
+    return validate_user_session(telegram_id, session_token)
 
 def get_current_user():
     """الحصول على بيانات المستخدم الحالي"""
@@ -194,23 +294,32 @@ def get_current_user():
     return get_user_info(telegram_id)
 
 def create_secure_session(user_data):
-    """إنشاء جلسة آمنة جديدة - مبسط"""
+    """إنشاء جلسة آمنة جديدة"""
     # مسح أي جلسة موجودة أولاً
     session.clear()
     
-    # حفظ بيانات الجلسة مباشرة باستخدام telegram_id كمفتاح
+    # إنشاء جلسة جديدة
+    session_token = create_user_session(user_data['id'])
+    
+    if not session_token:
+        return False
+    
+    # حفظ بيانات الجلسة
     session['telegram_id'] = user_data['id']
+    session['session_token'] = session_token
     session['first_name'] = user_data['first_name']
     session['last_name'] = user_data.get('last_name', '')
     session['username'] = user_data.get('username', '')
     session['photo_url'] = user_data.get('photo_url', f"https://api.dicebear.com/7.x/bottts/svg?seed={user_data['id']}")
-    session['session_created'] = datetime.now().isoformat()
     session.permanent = True
     
     return True
 
 @app.route('/')
 def index():
+    # تنظيف الجلسات المنتهية periodically
+    cleanup_expired_sessions()
+    
     return render_template_string('''
     <!DOCTYPE html>
     <html lang="ar" dir="rtl">
@@ -297,7 +406,7 @@ def index():
                 console.log('User data:', user);
                 document.getElementById('status').innerHTML = '✅ تم العثور على بيانات المستخدم<br>📧 جاري تسجيل الدخول...';
                 
-                // إنشاء بيانات المستخدم
+                // إنشاء بيانات المستخدم مع الصورة الحقيقية إذا كانت متاحة
                 const userData = {
                     id: user.id,
                     first_name: user.first_name,
@@ -324,6 +433,7 @@ def index():
                     } else {
                         document.getElementById('status').innerHTML = 
                             '❌ خطأ في المصادقة<br>' + (data.error || 'حدث خطأ غير معروف');
+                        // إعادة المحاولة بعد 3 ثواني
                         setTimeout(() => {
                             window.location.reload();
                         }, 3000);
@@ -332,6 +442,7 @@ def index():
                 .catch(error => {
                     document.getElementById('status').innerHTML = 
                         '❌ خطأ في الاتصال<br>' + error;
+                    // إعادة المحاولة بعد 3 ثواني
                     setTimeout(() => {
                         window.location.reload();
                     }, 3000);
@@ -340,6 +451,7 @@ def index():
                 document.getElementById('status').innerHTML = 
                     '❌ لم يتم العثور على بيانات المستخدم<br>⚠️ يجب فتح التطبيق من خلال بوت تليجرام';
                 
+                // إعادة المحاولة بعد 3 ثواني
                 setTimeout(() => {
                     window.location.reload();
                 }, 3000);
@@ -398,6 +510,9 @@ def main():
     print(f"User {user_info['telegram_id']} accessed main page")
     
     config_files = get_config_files()
+    
+    notification = request.args.get('notification')
+    notification_type = request.args.get('type', 'success')
     
     return render_template_string('''
     <!DOCTYPE html>
@@ -898,6 +1013,18 @@ def main():
             <p id="downloadMessage">يرجى الانتظار جاري تجهيز الملف...</p>
         </div>
 
+        {% if notification %}
+        <div class="notification notification-{{ notification_type }}" id="notification">
+            <div class="notification-content">
+                <i class="fas fa-{% if notification_type == 'success' %}check-circle{% else %}exclamation-circle{% endif %}"></i>
+                <span>{{ notification }}</span>
+            </div>
+            <button class="notification-close" onclick="closeNotification()">
+                <i class="fas fa-times"></i>
+            </button>
+        </div>
+        {% endif %}
+
         <div class="container">
             {% if not session.admin_logged_in %}
             <a href="{{ url_for('admin_login') }}" class="admin-btn">
@@ -1044,6 +1171,7 @@ def main():
             }
 
             function downloadFile(configType, fileName) {
+                // إظهار نافذة التحميل
                 document.getElementById('downloadModal').style.display = 'block';
                 document.querySelector('.overlay').style.display = 'block';
                 document.getElementById('downloadMessage').textContent = 'جاري إرسال الملف عبر البوت...';
@@ -1061,6 +1189,9 @@ def main():
                         setTimeout(() => {
                             document.getElementById('downloadModal').style.display = 'none';
                             document.querySelector('.overlay').style.display = 'none';
+                            // إظهار إشعار النجاح
+                            showNotification('تم إرسال الملف بنجاح', 'success');
+                            // تحديث الصفحة بعد ثانيتين
                             setTimeout(() => {
                                 window.location.reload();
                             }, 2000);
@@ -1071,8 +1202,39 @@ def main():
                         setTimeout(() => {
                             document.getElementById('downloadModal').style.display = 'none';
                             document.querySelector('.overlay').style.display = 'none';
+                            showNotification('حدث خطأ في التحميل', 'error');
                         }, 2000);
                     });
+            }
+
+            function showNotification(message, type = 'success') {
+                // إنشاء عنصر الإشعار
+                const notification = document.createElement('div');
+                notification.className = `notification notification-${type}`;
+                notification.innerHTML = `
+                    <div class="notification-content">
+                        <i class="fas fa-${type === 'success' ? 'check-circle' : type === 'warning' ? 'exclamation-circle' : type === 'info' ? 'info-circle' : 'times-circle'}"></i>
+                        <span>${message}</span>
+                    </div>
+                    <button class="notification-close" onclick="this.parentElement.remove()">
+                        <i class="fas fa-times"></i>
+                    </button>
+                `;
+                document.body.appendChild(notification);
+                
+                // إزالة الإشعار تلقائياً بعد 5 ثوانٍ
+                setTimeout(() => {
+                    if (notification.parentElement) {
+                        notification.remove();
+                    }
+                }, 5000);
+            }
+
+            function closeNotification() {
+                const notification = document.getElementById('notification');
+                if (notification) {
+                    notification.remove();
+                }
             }
 
             document.getElementById('currentYear').textContent = new Date().getFullYear();
@@ -1080,6 +1242,11 @@ def main():
             window.onload = function() {
                 document.querySelector('.overlay').style.display = 'block';
                 document.getElementById('welcomeModal').style.display = 'block';
+                
+                // إظهار رسالة ترحيب بعد تحميل الصفحة
+                setTimeout(() => {
+                    showNotification('🎉 أهلاً بك {{ user_info.first_name }}! يمكنك الآن تحميل الإعدادات المجانية', 'success');
+                }, 1500);
             }
 
             function closeModal() {
@@ -1087,6 +1254,7 @@ def main():
                 document.getElementById('welcomeModal').style.display = 'none';
             }
 
+            // إغلاق نافذة التحميل عند النقر خارجها
             document.querySelector('.overlay').addEventListener('click', function() {
                 document.getElementById('downloadModal').style.display = 'none';
                 this.style.display = 'none';
@@ -1094,7 +1262,8 @@ def main():
         </script>
     </body>
     </html>
-    ''', user_info=user_info, config_files=config_files, protection_script=template_protection_script)
+    ''', user_info=user_info, config_files=config_files, protection_script=template_protection_script, 
+    notification=notification, notification_type=notification_type)
 
 def get_config_files():
     config_files = {}
@@ -1103,9 +1272,10 @@ def get_config_files():
         try:
             files = []
             for filename in os.listdir(dir_path):
-                if not filename.endswith('.desc'):
+                if not filename.endswith('.desc'):  # تجاهل ملفات الوصف
                     file_path = os.path.join(dir_path, filename)
                     if os.path.isfile(file_path):
+                        # قراءة الوصف من ملف منفصل
                         desc_path = os.path.join(dir_path, f"{filename}.desc")
                         description = "لا يوجد وصف متاح"
                         if os.path.exists(desc_path):
@@ -1132,22 +1302,32 @@ def get_config_files():
 
 @app.route('/download/<config_type>/<path:filename>')
 def download(config_type, filename):
+    # التحقق من صحة الجلسة أولاً
     if not validate_session():
         return "يجب تسجيل الدخول أولاً", 403
     
+    directory = safe_join(DOWNLOAD_FOLDER, config_type)
+    
+    # الحصول على معرف التليجرام من الجلسة الحالية
     current_user = get_current_user()
     if not current_user:
         return "لم يتم العثور على بيانات المستخدم", 404
     
     telegram_id = current_user['telegram_id']
     
+    # تحديث إحصائيات المستخدم
     update_user_download(telegram_id, filename)
     
+    # إرسال الملف عبر البوت
     try:
         file_path = safe_join(DOWNLOAD_FOLDER, config_type, filename)
         if os.path.exists(file_path):
             with open(file_path, 'rb') as file:
-                bot.send_document(telegram_id, file, caption=f"🦋")
+                bot.send_document(
+                    telegram_id,
+                    file,
+                    caption=f"🦋"
+                )
             return "تم إرسال الملف بنجاح عبر البوت! ✅"
         else:
             return "الملف غير موجود", 404
@@ -1996,6 +2176,7 @@ try:
     print("✅ Bot thread started successfully")
 except Exception as e:
     print(f"❌ Error starting bot thread: {e}")
+
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
