@@ -4,7 +4,7 @@ import json
 from datetime import datetime
 from functools import wraps
 from threading import Thread, Lock
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, unquote
 
 from flask import Flask, render_template_string, send_from_directory, request, redirect, url_for, session, flash, jsonify
 from werkzeug.utils import secure_filename, safe_join
@@ -171,16 +171,10 @@ template_protection_script = """
 </script>
 """
 
-# نظام المصادقة المحسن - التحقق الفوري عند كل طلب
-def validate_instant_session():
-    """التحقق الفوري من جلسة المستخدم باستخدام Telegram WebApp data"""
-    # دائماً نتحقق من بيانات Telegram الفورية
-    telegram_data = get_telegram_webapp_data()
-    if not telegram_data or 'user' not in telegram_data:
-        return False
-    
-    current_user = telegram_data['user']
-    telegram_id = current_user.get('id')
+# نظام المصادقة المحسن
+def validate_session():
+    """التحقق من صحة جلسة المستخدم"""
+    telegram_id = session.get('telegram_id')
     
     if not telegram_id:
         return False
@@ -190,46 +184,37 @@ def validate_instant_session():
     if not user_info:
         return False
     
-    # تحديث الجلسة مع المستخدم الحالي
-    session['telegram_id'] = telegram_id
-    session['first_name'] = current_user.get('first_name', '')
-    session['last_name'] = current_user.get('last_name', '')
-    session['username'] = current_user.get('username', '')
-    session['photo_url'] = current_user.get('photo_url', f"https://api.dicebear.com/7.x/bottts/svg?seed={telegram_id}")
-    session['last_verified'] = datetime.now().isoformat()
-    
     return True
 
-def get_telegram_webapp_data():
-    """الحصول على بيانات Telegram WebApp من الطلب الحالي"""
-    # في بيئة production حقيقية، يجب التحقق من التوقيع هنا
-    init_data = request.args.get('tgWebAppData')
-    if init_data:
-        try:
-            from urllib.parse import parse_qs
-            parsed_data = parse_qs(init_data)
-            if 'user' in parsed_data:
-                user_json = parsed_data['user'][0]
-                return {'user': json.loads(user_json)}
-        except:
-            pass
-    return None
-
 def get_current_user():
-    """الحصول على بيانات المستخدم الحالي مع التحقق الفوري"""
-    if not validate_instant_session():
-        return None
-    
+    """الحصول على بيانات المستخدم الحالي"""
     telegram_id = session.get('telegram_id')
     if not telegram_id:
         return None
     
     return get_user_info(telegram_id)
 
+def create_secure_session(user_data):
+    """إنشاء جلسة آمنة جديدة"""
+    # مسح أي جلسة موجودة أولاً
+    session.clear()
+    
+    # حفظ بيانات الجلسة مباشرة باستخدام telegram_id كمفتاح
+    session['telegram_id'] = user_data['id']
+    session['first_name'] = user_data['first_name']
+    session['last_name'] = user_data.get('last_name', '')
+    session['username'] = user_data.get('username', '')
+    session['photo_url'] = user_data.get('photo_url', f"https://api.dicebear.com/7.x/bottts/svg?seed={user_data['id']}")
+    session['session_created'] = datetime.now().isoformat()
+    session.permanent = True
+    
+    return True
+
 @app.route('/')
 def index():
-    # مسح أي جلسة قديمة أولاً
-    session.clear()
+    # إذا كان المستخدم مسجلاً دخوله بالفعل، نوجهه مباشرة إلى الصفحة الرئيسية
+    if validate_session():
+        return redirect('/main')
     
     return render_template_string('''
     <!DOCTYPE html>
@@ -331,7 +316,7 @@ def index():
                 };
 
                 // إرسال بيانات المستخدم إلى الخادم للتحقق الفوري
-                fetch('/instant-auth', {
+                fetch('/auth', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
@@ -344,7 +329,7 @@ def index():
                         document.getElementById('status').innerHTML = '✅ تم التحقق من الهوية بنجاح<br>🚀 جاري التوجيه...';
                         console.log('Authenticated user:', data.user);
                         setTimeout(() => {
-                            window.location.href = '/main?tgWebAppData=' + encodeURIComponent(Telegram.WebApp.initData);
+                            window.location.href = '/main';
                         }, 1000);
                     } else {
                         document.getElementById('status').innerHTML = 
@@ -374,8 +359,8 @@ def index():
     </html>
     ''')
 
-@app.route('/instant-auth', methods=['POST'])
-def instant_auth():
+@app.route('/auth', methods=['POST'])
+def auth():
     try:
         user_data = request.get_json()
         
@@ -385,6 +370,10 @@ def instant_auth():
         telegram_id = user_data['id']
         if not telegram_id:
             return jsonify({'success': False, 'error': 'معرف التليجرام مطلوب'})
+        
+        # إنشاء جلسة آمنة جديدة
+        if not create_secure_session(user_data):
+            return jsonify({'success': False, 'error': 'فشل في إنشاء الجلسة'})
         
         # حفظ/تحديث بيانات المستخدم في قاعدة البيانات
         save_user_info(user_data)
@@ -399,14 +388,14 @@ def instant_auth():
         })
         
     except Exception as e:
-        print(f"Error in instant auth: {e}")
+        print(f"Error in auth: {e}")
         return jsonify({'success': False, 'error': str(e)})
 
 @app.route('/main')
 def main():
-    # التحقق الفوري من الهوية عند كل طلب
-    if not validate_instant_session():
-        print("Instant session validation failed, redirecting to index")
+    # التحقق من صحة الجلسة أولاً
+    if not validate_session():
+        print("Session validation failed, redirecting to index")
         session.clear()
         return redirect('/')
     
@@ -418,7 +407,7 @@ def main():
         session.clear()
         return redirect('/')
     
-    print(f"User {user_info['telegram_id']} accessed main page - REAL TIME VERIFICATION")
+    print(f"User {user_info['telegram_id']} accessed main page")
     
     config_files = get_config_files()
     
@@ -1033,21 +1022,6 @@ def main():
         </div>
 
         <script>
-            // التحقق الفوري من الهوية عند تحميل الصفحة
-            function verifyIdentity() {
-                const user = Telegram.WebApp.initDataUnsafe.user;
-                if (!user) {
-                    console.log('No user data found, redirecting...');
-                    window.location.href = '/';
-                    return;
-                }
-                
-                console.log('Current user verified:', user);
-            }
-
-            // التحقق عند تحميل الصفحة
-            window.addEventListener('load', verifyIdentity);
-
             function toggleFileList() {
                 var selectedType = document.getElementById("config-type").value;
                 var fileOptions = document.getElementById("file-options");
@@ -1086,12 +1060,16 @@ def main():
                 document.querySelector('.overlay').style.display = 'block';
                 document.getElementById('downloadMessage').textContent = 'جاري إرسال الملف عبر البوت...';
                 
-                fetch(`/download/${configType}/${encodeURIComponent(fileName)}`)
+                // استخدام encodeURIComponent لتشفير اسم الملف بشكل صحيح
+                const encodedFileName = encodeURIComponent(fileName);
+                const encodedConfigType = encodeURIComponent(configType);
+                
+                fetch(`/download/${encodedConfigType}/${encodedFileName}`)
                     .then(response => {
                         if (response.ok) {
                             return response.text();
                         } else {
-                            throw new Error('خطأ في الخادم');
+                            throw new Error('خطأ في الخادم: ' + response.status);
                         }
                     })
                     .then(message => {
@@ -1105,11 +1083,12 @@ def main():
                         }, 2000);
                     })
                     .catch(error => {
+                        console.error('Download error:', error);
                         document.getElementById('downloadMessage').innerHTML = '❌ ' + error.message;
                         setTimeout(() => {
                             document.getElementById('downloadModal').style.display = 'none';
                             document.querySelector('.overlay').style.display = 'none';
-                        }, 2000);
+                        }, 3000);
                     });
             }
 
@@ -1170,8 +1149,8 @@ def get_config_files():
 
 @app.route('/download/<config_type>/<path:filename>')
 def download(config_type, filename):
-    # التحقق الفوري من الهوية قبل كل تحميل
-    if not validate_instant_session():
+    # التحقق من صحة الجلسة أولاً
+    if not validate_session():
         return "يجب تسجيل الدخول أولاً", 403
     
     current_user = get_current_user()
@@ -1180,19 +1159,41 @@ def download(config_type, filename):
     
     telegram_id = current_user['telegram_id']
     
-    update_user_download(telegram_id, filename)
-    
+    # فك تشفير اسم الملف
     try:
-        file_path = safe_join(DOWNLOAD_FOLDER, config_type, filename)
+        decoded_filename = unquote(filename)
+        decoded_config_type = unquote(config_type)
+    except:
+        decoded_filename = filename
+        decoded_config_type = config_type
+    
+    print(f"Download request: User {telegram_id}, File: {decoded_filename}, Type: {decoded_config_type}")
+    
+    # تحديث إحصائيات المستخدم
+    update_user_download(telegram_id, decoded_filename)
+    
+    # إرسال الملف عبر البوت
+    try:
+        file_path = safe_join(DOWNLOAD_FOLDER, decoded_config_type, decoded_filename)
+        print(f"Looking for file at: {file_path}")
+        
         if os.path.exists(file_path):
+            print(f"File found, sending to user {telegram_id}")
             with open(file_path, 'rb') as file:
-                bot.send_document(telegram_id, file, caption=f"🦋")
+                bot.send_document(telegram_id, file, caption=f"🦋 تم إرسال الملف بنجاح!\n\n📁 اسم الملف: {decoded_filename}\n🔧 النوع: {decoded_config_type}\n\nشكراً لاستخدامك خدمتنا 💙")
             return "تم إرسال الملف بنجاح عبر البوت! ✅"
         else:
+            print(f"File not found: {file_path}")
             return "الملف غير موجود", 404
     except Exception as e:
         print(f"Error sending file via bot: {e}")
-        return f"حدث خطأ في إرسال الملف: {str(e)}", 500
+        error_msg = f"حدث خطأ في إرسال الملف: {str(e)}"
+        # محاولة إرسال رسالة خطأ للمستخدم
+        try:
+            bot.send_message(telegram_id, f"❌ {error_msg}")
+        except:
+            pass
+        return error_msg, 500
 
 @app.route('/admin/login', methods=['GET', 'POST'])
 def admin_login():
