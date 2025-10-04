@@ -31,7 +31,6 @@ for config_type in CONFIG_TYPES:
 # ملفات JSON للتخزين
 USERS_JSON = os.path.join(BASE_DIR, 'users.json')
 FILES_JSON = os.path.join(BASE_DIR, 'files.json')
-SESSIONS_JSON = os.path.join(BASE_DIR, 'sessions.json')  # ملف جديد لإدارة الجلسات
 
 # قفل للتعامل الآمن مع الملفات
 json_lock = Lock()
@@ -57,7 +56,7 @@ def get_unique_filename(directory, original_name):
             return unique_name
         counter += 1
 
-# وظائف التعامل مع ملف JSON للمستخدمين والجلسات
+# نظام إدارة المستخدمين المبسط والفعال
 def init_json_storage():
     """تهيئة ملفات JSON إذا لم تكن موجودة"""
     with json_lock:
@@ -67,10 +66,6 @@ def init_json_storage():
         
         if not os.path.exists(FILES_JSON):
             with open(FILES_JSON, 'w', encoding='utf-8') as f:
-                json.dump({}, f, ensure_ascii=False, indent=2)
-        
-        if not os.path.exists(SESSIONS_JSON):
-            with open(SESSIONS_JSON, 'w', encoding='utf-8') as f:
                 json.dump({}, f, ensure_ascii=False, indent=2)
 
 def read_users():
@@ -87,36 +82,6 @@ def write_users(users_data):
     with json_lock:
         with open(USERS_JSON, 'w', encoding='utf-8') as f:
             json.dump(users_data, f, ensure_ascii=False, indent=2)
-
-def read_files():
-    """قراءة بيانات الملفات من ملف JSON"""
-    with json_lock:
-        try:
-            with open(FILES_JSON, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            return {}
-
-def write_files(files_data):
-    """كتابة بيانات الملفات إلى ملف JSON"""
-    with json_lock:
-        with open(FILES_JSON, 'w', encoding='utf-8') as f:
-            json.dump(files_data, f, ensure_ascii=False, indent=2)
-
-def read_sessions():
-    """قراءة بيانات الجلسات من ملف JSON"""
-    with json_lock:
-        try:
-            with open(SESSIONS_JSON, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            return {}
-
-def write_sessions(sessions_data):
-    """كتابة بيانات الجلسات إلى ملف JSON"""
-    with json_lock:
-        with open(SESSIONS_JSON, 'w', encoding='utf-8') as f:
-            json.dump(sessions_data, f, ensure_ascii=False, indent=2)
 
 def get_user_info(telegram_id):
     """الحصول على معلومات المستخدم"""
@@ -138,15 +103,16 @@ def save_user_info(user_data):
             'last_download': None,
             'download_count': 0,
             'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'sessions': []  # قائمة بالجلسات النشطة
+            'last_login': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         }
     else:
-        # تحديث البيانات الأساسية فقط
+        # تحديث البيانات الأساسية وآخر تسجيل دخول
         users[telegram_id].update({
             'first_name': user_data['first_name'],
             'last_name': user_data.get('last_name', ''),
             'username': user_data.get('username', ''),
-            'photo_url': user_data.get('photo_url', users[telegram_id].get('photo_url', f"https://api.dicebear.com/7.x/bottts/svg?seed={user_data['id']}"))
+            'photo_url': user_data.get('photo_url', users[telegram_id].get('photo_url', f"https://api.dicebear.com/7.x/bottts/svg?seed={user_data['id']}")),
+            'last_login': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         })
     
     write_users(users)
@@ -204,102 +170,44 @@ template_protection_script = """
 </script>
 """
 
-def show_notification(message, type='success'):
-    return f"""
-    <div class="notification notification-{type}" id="notification">
-        <div class="notification-content">
-            <i class="fas fa-{ 'check-circle' if type == 'success' else 'exclamation-circle' if type == 'warning' else 'info-circle' if type == 'info' else 'times-circle'}"></i>
-            <span>{message}</span>
-        </div>
-        <button class="notification-close" onclick="closeNotification()">
-            <i class="fas fa-times"></i>
-        </button>
-    </div>
-    <script>
-        function closeNotification() {{
-            document.getElementById('notification').style.display = 'none';
-        }}
-        setTimeout(() => {{
-            const notification = document.getElementById('notification');
-            if (notification) notification.style.display = 'none';
-        }}, 5000);
-    </script>
-    """
-
-# دالة محسنة للتحقق من صحة الجلسة
+# نظام المصادقة المبسط والفعال
 def validate_session():
-    """التحقق من أن الجلسة صالحة ولم يتم العبث بها"""
-    if not session.get('telegram_id'):
-        return False
+    """التحقق من صحة جلسة المستخدم - مبسط"""
+    telegram_id = session.get('telegram_id')
     
-    # التحقق من أن بيانات الجلسة متسقة
-    required_fields = ['telegram_id', 'first_name', 'session_token']
-    for field in required_fields:
-        if field not in session:
-            return False
+    if not telegram_id:
+        return False
     
     # التحقق من أن المستخدم موجود في قاعدة البيانات
-    user_info = get_user_info(session['telegram_id'])
+    user_info = get_user_info(telegram_id)
     if not user_info:
-        return False
-    
-    # التحقق من أن توكن الجلسة صالح
-    if session.get('session_token') != user_info.get('current_session_token'):
         return False
     
     return True
 
-# دالة محسنة لإنشاء جلسة آمنة
+def get_current_user():
+    """الحصول على بيانات المستخدم الحالي"""
+    telegram_id = session.get('telegram_id')
+    if not telegram_id:
+        return None
+    
+    return get_user_info(telegram_id)
+
 def create_secure_session(user_data):
-    """إنشاء جلسة آمنة جديدة"""
+    """إنشاء جلسة آمنة جديدة - مبسط"""
     # مسح أي جلسة موجودة أولاً
     session.clear()
     
-    # إنشاء توكن جلسة فريد
-    session_token = secrets.token_urlsafe(32)
-    
-    # حفظ بيانات المستخدم الأساسية
+    # حفظ بيانات الجلسة مباشرة باستخدام telegram_id كمفتاح
     session['telegram_id'] = user_data['id']
     session['first_name'] = user_data['first_name']
     session['last_name'] = user_data.get('last_name', '')
     session['username'] = user_data.get('username', '')
     session['photo_url'] = user_data.get('photo_url', f"https://api.dicebear.com/7.x/bottts/svg?seed={user_data['id']}")
-    session['session_token'] = session_token
-    session['created_at'] = datetime.now().isoformat()
-    session['user_agent'] = request.headers.get('User-Agent', '')
+    session['session_created'] = datetime.now().isoformat()
     session.permanent = True
     
-    # تحديث توكن الجلسة الحالي في قاعدة البيانات
-    users = read_users()
-    telegram_id = str(user_data['id'])
-    
-    if telegram_id in users:
-        users[telegram_id]['current_session_token'] = session_token
-        # حفظ سجل الجلسة
-        if 'session_history' not in users[telegram_id]:
-            users[telegram_id]['session_history'] = []
-        
-        users[telegram_id]['session_history'].append({
-            'session_token': session_token,
-            'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'user_agent': request.headers.get('User-Agent', '')[:100]  # حفظ أول 100 حرف فقط
-        })
-        
-        # الاحتفاظ بآخر 10 جلسات فقط
-        if len(users[telegram_id]['session_history']) > 10:
-            users[telegram_id]['session_history'] = users[telegram_id]['session_history'][-10:]
-        
-        write_users(users)
-
-# دالة لتنظيف الجلسات القديمة
-def cleanup_old_sessions():
-    """تنظيف الجلسات القديمة (يمكن استدعاؤها دورياً)"""
-    users = read_users()
-    for user_id, user_data in users.items():
-        if 'session_history' in user_data:
-            # يمكن إضافة منطق لحذف الجلسات القديمة هنا
-            pass
-    write_users(users)
+    return True
 
 @app.route('/')
 def index():
@@ -389,7 +297,7 @@ def index():
                 console.log('User data:', user);
                 document.getElementById('status').innerHTML = '✅ تم العثور على بيانات المستخدم<br>📧 جاري تسجيل الدخول...';
                 
-                // إنشاء بيانات المستخدم مع الصورة الحقيقية إذا كانت متاحة
+                // إنشاء بيانات المستخدم
                 const userData = {
                     id: user.id,
                     first_name: user.first_name,
@@ -416,7 +324,6 @@ def index():
                     } else {
                         document.getElementById('status').innerHTML = 
                             '❌ خطأ في المصادقة<br>' + (data.error || 'حدث خطأ غير معروف');
-                        // إعادة المحاولة بعد 3 ثواني
                         setTimeout(() => {
                             window.location.reload();
                         }, 3000);
@@ -425,7 +332,6 @@ def index():
                 .catch(error => {
                     document.getElementById('status').innerHTML = 
                         '❌ خطأ في الاتصال<br>' + error;
-                    // إعادة المحاولة بعد 3 ثواني
                     setTimeout(() => {
                         window.location.reload();
                     }, 3000);
@@ -434,7 +340,6 @@ def index():
                 document.getElementById('status').innerHTML = 
                     '❌ لم يتم العثور على بيانات المستخدم<br>⚠️ يجب فتح التطبيق من خلال بوت تليجرام';
                 
-                // إعادة المحاولة بعد 3 ثواني
                 setTimeout(() => {
                     window.location.reload();
                 }, 3000);
@@ -452,13 +357,23 @@ def auth():
         if not user_data or 'id' not in user_data:
             return jsonify({'success': False, 'error': 'بيانات غير صالحة'})
         
-        # إنشاء جلسة آمنة جديدة
-        create_secure_session(user_data)
+        # التحقق من أن البيانات تحتوي على معرف التليجرام
+        telegram_id = user_data['id']
+        if not telegram_id:
+            return jsonify({'success': False, 'error': 'معرف التليجرام مطلوب'})
         
-        # حفظ في قاعدة البيانات
+        # إنشاء جلسة آمنة جديدة
+        if not create_secure_session(user_data):
+            return jsonify({'success': False, 'error': 'فشل في إنشاء الجلسة'})
+        
+        # حفظ/تحديث بيانات المستخدم في قاعدة البيانات
         save_user_info(user_data)
         
-        return jsonify({'success': True, 'message': 'تم إنشاء الجلسة بنجاح'})
+        return jsonify({
+            'success': True, 
+            'message': 'تم إنشاء الجلسة بنجاح',
+            'telegram_id': telegram_id
+        })
         
     except Exception as e:
         print(f"Error in auth: {e}")
@@ -468,38 +383,21 @@ def auth():
 def main():
     # التحقق من صحة الجلسة أولاً
     if not validate_session():
-        print(f"Session validation failed for session: {session}")
-        # مسح الجلسة غير الصالحة
+        print("Session validation failed, redirecting to index")
         session.clear()
         return redirect('/')
     
-    user_info = None
-    
-    # الحصول على بيانات المستخدم من قاعدة البيانات باستخدام telegram_id من الجلسة
-    user_db_info = get_user_info(session['telegram_id'])
-    if user_db_info:
-        last_download = user_db_info.get('last_download', 'لم يقم بتنزيل')
-        download_count = user_db_info.get('download_count', 0)
-        
-        user_info = {
-            'id': session['telegram_id'],
-            'first_name': user_db_info.get('first_name', ''),
-            'last_name': user_db_info.get('last_name', ''),
-            'username': user_db_info.get('username', ''),
-            'photo_url': user_db_info.get('photo_url', 'https://api.dicebear.com/7.x/bottts/svg?seed=unknown'),
-            'last_download': last_download,
-            'download_count': download_count
-        }
+    # الحصول على بيانات المستخدم الحالي
+    user_info = get_current_user()
     
     if not user_info:
         print("User info not found, redirecting to index")
         session.clear()
         return redirect('/')
     
-    config_files = get_config_files()
+    print(f"User {user_info['telegram_id']} accessed main page")
     
-    notification = request.args.get('notification')
-    notification_type = request.args.get('type', 'success')
+    config_files = get_config_files()
     
     return render_template_string('''
     <!DOCTYPE html>
@@ -1000,18 +898,6 @@ def main():
             <p id="downloadMessage">يرجى الانتظار جاري تجهيز الملف...</p>
         </div>
 
-        {% if notification %}
-        <div class="notification notification-{{ notification_type }}" id="notification">
-            <div class="notification-content">
-                <i class="fas fa-{% if notification_type == 'success' %}check-circle{% else %}exclamation-circle{% endif %}"></i>
-                <span>{{ notification }}</span>
-            </div>
-            <button class="notification-close" onclick="closeNotification()">
-                <i class="fas fa-times"></i>
-            </button>
-        </div>
-        {% endif %}
-
         <div class="container">
             {% if not session.admin_logged_in %}
             <a href="{{ url_for('admin_login') }}" class="admin-btn">
@@ -1024,12 +910,13 @@ def main():
             </button>
             
             <div class="user-section">
-                <img src="{{ user_info.photo_url }}" alt="Avatar" class="avatar-img" onerror="this.src='https://api.dicebear.com/7.x/bottts/svg?seed={{ user_info.id }}'">
+                <img src="{{ user_info.photo_url }}" alt="Avatar" class="avatar-img" onerror="this.src='https://api.dicebear.com/7.x/bottts/svg?seed={{ user_info.telegram_id }}'">
                 <div class="avatar-name">
                     {{ user_info.first_name }} {{ user_info.last_name }}
                     {% if user_info.username %}
                         <br><small>@{{ user_info.username }}</small>
                     {% endif %}
+                    <br><small style="font-size: 0.8rem; color: #ccc;">ID: {{ user_info.telegram_id }}</small>
                 </div>
                 
                 <div class="user-stats">
@@ -1039,7 +926,7 @@ def main():
                     </div>
                     <div class="stat-card">
                         <div>آخر تنزيل</div>
-                        <div class="stat-value">{{ user_info.last_download }}</div>
+                        <div class="stat-value">{{ user_info.last_download if user_info.last_download else 'لم يقم بتنزيل' }}</div>
                     </div>
                 </div>
             </div>
@@ -1157,7 +1044,6 @@ def main():
             }
 
             function downloadFile(configType, fileName) {
-                // إظهار نافذة التحميل
                 document.getElementById('downloadModal').style.display = 'block';
                 document.querySelector('.overlay').style.display = 'block';
                 document.getElementById('downloadMessage').textContent = 'جاري إرسال الملف عبر البوت...';
@@ -1175,9 +1061,6 @@ def main():
                         setTimeout(() => {
                             document.getElementById('downloadModal').style.display = 'none';
                             document.querySelector('.overlay').style.display = 'none';
-                            // إظهار إشعار النجاح
-                            showNotification('تم إرسال الملف بنجاح', 'success');
-                            // تحديث الصفحة بعد ثانيتين
                             setTimeout(() => {
                                 window.location.reload();
                             }, 2000);
@@ -1188,39 +1071,8 @@ def main():
                         setTimeout(() => {
                             document.getElementById('downloadModal').style.display = 'none';
                             document.querySelector('.overlay').style.display = 'none';
-                            showNotification('حدث خطأ في التحميل', 'error');
                         }, 2000);
                     });
-            }
-
-            function showNotification(message, type = 'success') {
-                // إنشاء عنصر الإشعار
-                const notification = document.createElement('div');
-                notification.className = `notification notification-${type}`;
-                notification.innerHTML = `
-                    <div class="notification-content">
-                        <i class="fas fa-${type === 'success' ? 'check-circle' : type === 'warning' ? 'exclamation-circle' : type === 'info' ? 'info-circle' : 'times-circle'}"></i>
-                        <span>${message}</span>
-                    </div>
-                    <button class="notification-close" onclick="this.parentElement.remove()">
-                        <i class="fas fa-times"></i>
-                    </button>
-                `;
-                document.body.appendChild(notification);
-                
-                // إزالة الإشعار تلقائياً بعد 5 ثوانٍ
-                setTimeout(() => {
-                    if (notification.parentElement) {
-                        notification.remove();
-                    }
-                }, 5000);
-            }
-
-            function closeNotification() {
-                const notification = document.getElementById('notification');
-                if (notification) {
-                    notification.remove();
-                }
             }
 
             document.getElementById('currentYear').textContent = new Date().getFullYear();
@@ -1228,11 +1080,6 @@ def main():
             window.onload = function() {
                 document.querySelector('.overlay').style.display = 'block';
                 document.getElementById('welcomeModal').style.display = 'block';
-                
-                // إظهار رسالة ترحيب بعد تحميل الصفحة
-                setTimeout(() => {
-                    showNotification('🎉 أهلاً بك {{ user_info.first_name }}! يمكنك الآن تحميل الإعدادات المجانية', 'success');
-                }, 1500);
             }
 
             function closeModal() {
@@ -1240,7 +1087,6 @@ def main():
                 document.getElementById('welcomeModal').style.display = 'none';
             }
 
-            // إغلاق نافذة التحميل عند النقر خارجها
             document.querySelector('.overlay').addEventListener('click', function() {
                 document.getElementById('downloadModal').style.display = 'none';
                 this.style.display = 'none';
@@ -1248,8 +1094,7 @@ def main():
         </script>
     </body>
     </html>
-    ''', user_info=user_info, config_files=config_files, protection_script=template_protection_script, 
-    notification=notification, notification_type=notification_type)
+    ''', user_info=user_info, config_files=config_files, protection_script=template_protection_script)
 
 def get_config_files():
     config_files = {}
@@ -1258,10 +1103,9 @@ def get_config_files():
         try:
             files = []
             for filename in os.listdir(dir_path):
-                if not filename.endswith('.desc'):  # تجاهل ملفات الوصف
+                if not filename.endswith('.desc'):
                     file_path = os.path.join(dir_path, filename)
                     if os.path.isfile(file_path):
-                        # قراءة الوصف من ملف منفصل
                         desc_path = os.path.join(dir_path, f"{filename}.desc")
                         description = "لا يوجد وصف متاح"
                         if os.path.exists(desc_path):
@@ -1288,38 +1132,28 @@ def get_config_files():
 
 @app.route('/download/<config_type>/<path:filename>')
 def download(config_type, filename):
-    # التحقق من صحة الجلسة أولاً
     if not validate_session():
         return "يجب تسجيل الدخول أولاً", 403
     
-    directory = safe_join(DOWNLOAD_FOLDER, config_type)
+    current_user = get_current_user()
+    if not current_user:
+        return "لم يتم العثور على بيانات المستخدم", 404
     
-    # تحديث إحصائيات المستخدم باستخدام telegram_id من الجلسة
-    update_user_download(session['telegram_id'], filename)
+    telegram_id = current_user['telegram_id']
     
-    # إرسال الملف عبر البوت
+    update_user_download(telegram_id, filename)
+    
     try:
         file_path = safe_join(DOWNLOAD_FOLDER, config_type, filename)
         if os.path.exists(file_path):
             with open(file_path, 'rb') as file:
-                bot.send_document(
-                    session['telegram_id'],
-                    file,
-                    caption=f"🦋"
-                )
+                bot.send_document(telegram_id, file, caption=f"🦋")
             return "تم إرسال الملف بنجاح عبر البوت! ✅"
         else:
             return "الملف غير موجود", 404
     except Exception as e:
         print(f"Error sending file via bot: {e}")
         return f"حدث خطأ في إرسال الملف: {str(e)}", 500
-
-# إضافة route جديد لتسجيل الخروج
-@app.route('/logout')
-def logout():
-    """تسجيل الخروج ومسح الجلسة"""
-    session.clear()
-    return redirect('/')
 
 @app.route('/admin/login', methods=['GET', 'POST'])
 def admin_login():
@@ -2162,7 +1996,6 @@ try:
     print("✅ Bot thread started successfully")
 except Exception as e:
     print(f"❌ Error starting bot thread: {e}")
-
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
