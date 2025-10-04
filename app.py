@@ -31,7 +31,7 @@ for config_type in CONFIG_TYPES:
 # ملفات JSON للتخزين
 USERS_JSON = os.path.join(BASE_DIR, 'users.json')
 FILES_JSON = os.path.join(BASE_DIR, 'files.json')
-SESSIONS_JSON = os.path.join(BASE_DIR, 'sessions.json')  # ملف جديد للجلسات
+SESSIONS_JSON = os.path.join(BASE_DIR, 'sessions.json')  # ملف جديد لإدارة الجلسات
 
 # قفل للتعامل الآمن مع الملفات
 json_lock = Lock()
@@ -88,21 +88,6 @@ def write_users(users_data):
         with open(USERS_JSON, 'w', encoding='utf-8') as f:
             json.dump(users_data, f, ensure_ascii=False, indent=2)
 
-def read_sessions():
-    """قراءة بيانات الجلسات من ملف JSON"""
-    with json_lock:
-        try:
-            with open(SESSIONS_JSON, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            return {}
-
-def write_sessions(sessions_data):
-    """كتابة بيانات الجلسات إلى ملف JSON"""
-    with json_lock:
-        with open(SESSIONS_JSON, 'w', encoding='utf-8') as f:
-            json.dump(sessions_data, f, ensure_ascii=False, indent=2)
-
 def read_files():
     """قراءة بيانات الملفات من ملف JSON"""
     with json_lock:
@@ -117,6 +102,21 @@ def write_files(files_data):
     with json_lock:
         with open(FILES_JSON, 'w', encoding='utf-8') as f:
             json.dump(files_data, f, ensure_ascii=False, indent=2)
+
+def read_sessions():
+    """قراءة بيانات الجلسات من ملف JSON"""
+    with json_lock:
+        try:
+            with open(SESSIONS_JSON, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
+
+def write_sessions(sessions_data):
+    """كتابة بيانات الجلسات إلى ملف JSON"""
+    with json_lock:
+        with open(SESSIONS_JSON, 'w', encoding='utf-8') as f:
+            json.dump(sessions_data, f, ensure_ascii=False, indent=2)
 
 def get_user_info(telegram_id):
     """الحصول على معلومات المستخدم"""
@@ -138,7 +138,7 @@ def save_user_info(user_data):
             'last_download': None,
             'download_count': 0,
             'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'sessions': {}  # تخزين الجلسات النشطة
+            'sessions': []  # قائمة بالجلسات النشطة
         }
     else:
         # تحديث البيانات الأساسية فقط
@@ -226,93 +226,83 @@ def show_notification(message, type='success'):
     </script>
     """
 
-# === الدوال المحسنة للجلسات ===
-
+# دالة محسنة للتحقق من صحة الجلسة
 def validate_session():
     """التحقق من أن الجلسة صالحة ولم يتم العبث بها"""
-    if not session.get('telegram_id') or not session.get('session_token'):
+    if not session.get('telegram_id'):
         return False
     
-    telegram_id = session['telegram_id']
-    session_token = session['session_token']
+    # التحقق من أن بيانات الجلسة متسقة
+    required_fields = ['telegram_id', 'first_name', 'session_token']
+    for field in required_fields:
+        if field not in session:
+            return False
     
     # التحقق من أن المستخدم موجود في قاعدة البيانات
-    user_info = get_user_info(telegram_id)
+    user_info = get_user_info(session['telegram_id'])
     if not user_info:
         return False
     
-    # التحقق من أن token الجلسة صالح
-    if 'sessions' in user_info and session_token in user_info['sessions']:
-        session_data = user_info['sessions'][session_token]
-        # التحقق من انتهاء صلاحية الجلسة (24 ساعة)
-        if datetime.now().timestamp() - session_data.get('created_at', 0) > 86400:
-            # حذف الجلسة المنتهية
-            del user_info['sessions'][session_token]
-            write_users(read_users())  # تحديث البيانات
-            return False
-        return True
+    # التحقق من أن توكن الجلسة صالح
+    if session.get('session_token') != user_info.get('current_session_token'):
+        return False
     
-    return False
+    return True
 
+# دالة محسنة لإنشاء جلسة آمنة
 def create_secure_session(user_data):
     """إنشاء جلسة آمنة جديدة"""
     # مسح أي جلسة موجودة أولاً
     session.clear()
     
-    telegram_id = user_data['id']
+    # إنشاء توكن جلسة فريد
     session_token = secrets.token_urlsafe(32)
     
-    # حفظ بيانات المستخدم الأساسية في الجلسة
-    session['telegram_id'] = telegram_id
+    # حفظ بيانات المستخدم الأساسية
+    session['telegram_id'] = user_data['id']
     session['first_name'] = user_data['first_name']
     session['last_name'] = user_data.get('last_name', '')
     session['username'] = user_data.get('username', '')
-    session['photo_url'] = user_data.get('photo_url', f"https://api.dicebear.com/7.x/bottts/svg?seed={telegram_id}")
+    session['photo_url'] = user_data.get('photo_url', f"https://api.dicebear.com/7.x/bottts/svg?seed={user_data['id']}")
     session['session_token'] = session_token
     session['created_at'] = datetime.now().isoformat()
+    session['user_agent'] = request.headers.get('User-Agent', '')
     session.permanent = True
     
-    # حفظ الجلسة في قاعدة البيانات
+    # تحديث توكن الجلسة الحالي في قاعدة البيانات
     users = read_users()
-    telegram_id_str = str(telegram_id)
+    telegram_id = str(user_data['id'])
     
-    if telegram_id_str not in users:
-        save_user_info(user_data)
-        users = read_users()  # إعادة القراءة بعد الحفظ
-    
-    if 'sessions' not in users[telegram_id_str]:
-        users[telegram_id_str]['sessions'] = {}
-    
-    # تخزين بيانات الجلسة
-    users[telegram_id_str]['sessions'][session_token] = {
-        'created_at': datetime.now().timestamp(),
-        'user_agent': request.headers.get('User-Agent', ''),
-        'ip_address': request.remote_addr
-    }
-    
-    write_users(users)
+    if telegram_id in users:
+        users[telegram_id]['current_session_token'] = session_token
+        # حفظ سجل الجلسة
+        if 'session_history' not in users[telegram_id]:
+            users[telegram_id]['session_history'] = []
+        
+        users[telegram_id]['session_history'].append({
+            'session_token': session_token,
+            'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'user_agent': request.headers.get('User-Agent', '')[:100]  # حفظ أول 100 حرف فقط
+        })
+        
+        # الاحتفاظ بآخر 10 جلسات فقط
+        if len(users[telegram_id]['session_history']) > 10:
+            users[telegram_id]['session_history'] = users[telegram_id]['session_history'][-10:]
+        
+        write_users(users)
 
-def cleanup_expired_sessions():
-    """تنظيف الجلسات المنتهية الصلاحية"""
+# دالة لتنظيف الجلسات القديمة
+def cleanup_old_sessions():
+    """تنظيف الجلسات القديمة (يمكن استدعاؤها دورياً)"""
     users = read_users()
-    current_time = datetime.now().timestamp()
-    
     for user_id, user_data in users.items():
-        if 'sessions' in user_data:
-            expired_sessions = []
-            for session_token, session_data in user_data['sessions'].items():
-                if current_time - session_data.get('created_at', 0) > 86400:  # 24 ساعة
-                    expired_sessions.append(session_token)
-            
-            for session_token in expired_sessions:
-                del user_data['sessions'][session_token]
-    
+        if 'session_history' in user_data:
+            # يمكن إضافة منطق لحذف الجلسات القديمة هنا
+            pass
     write_users(users)
 
 @app.route('/')
 def index():
-    # تنظيف الجلسات المنتهية عند كل زيارة للصفحة الرئيسية
-    cleanup_expired_sessions()
     return render_template_string('''
     <!DOCTYPE html>
     <html lang="ar" dir="rtl">
@@ -479,11 +469,13 @@ def main():
     # التحقق من صحة الجلسة أولاً
     if not validate_session():
         print(f"Session validation failed for session: {session}")
+        # مسح الجلسة غير الصالحة
+        session.clear()
         return redirect('/')
     
     user_info = None
     
-    # الحصول على بيانات المستخدم من قاعدة البيانات
+    # الحصول على بيانات المستخدم من قاعدة البيانات باستخدام telegram_id من الجلسة
     user_db_info = get_user_info(session['telegram_id'])
     if user_db_info:
         last_download = user_db_info.get('last_download', 'لم يقم بتنزيل')
@@ -501,6 +493,7 @@ def main():
     
     if not user_info:
         print("User info not found, redirecting to index")
+        session.clear()
         return redirect('/')
     
     config_files = get_config_files()
@@ -1301,7 +1294,7 @@ def download(config_type, filename):
     
     directory = safe_join(DOWNLOAD_FOLDER, config_type)
     
-    # تحديث إحصائيات المستخدم
+    # تحديث إحصائيات المستخدم باستخدام telegram_id من الجلسة
     update_user_download(session['telegram_id'], filename)
     
     # إرسال الملف عبر البوت
@@ -1320,6 +1313,171 @@ def download(config_type, filename):
     except Exception as e:
         print(f"Error sending file via bot: {e}")
         return f"حدث خطأ في إرسال الملف: {str(e)}", 500
+
+# إضافة route جديد لتسجيل الخروج
+@app.route('/logout')
+def logout():
+    """تسجيل الخروج ومسح الجلسة"""
+    session.clear()
+    return redirect('/')
+
+@app.route('/admin/login', methods=['GET', 'POST'])
+def admin_login():
+    if request.method == 'POST':
+        if (request.form['username'] == ADMIN_CREDENTIALS['username'] and
+            request.form['password'] == ADMIN_CREDENTIALS['password']):
+            session['admin_logged_in'] = True
+            return redirect(url_for('admin_dashboard'))
+        flash('بيانات الدخول غير صحيحة!', 'error')
+    return render_template_string('''
+    <!DOCTYPE html>
+    <html lang="ar" dir="rtl">
+    <head>
+        <meta name="theme-color" content="#0a192f">
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>تسجيل الدخول للإدارة</title>
+        <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@300&display=swap" rel="stylesheet">
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+        <meta name="robots" content="noindex,nofollow">
+        <style>
+            body {
+                font-family: 'Cairo', sans-serif;
+                background-color: #0a192f;
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                min-height: 100vh;
+                margin: 0;
+                color: white;
+            }
+            .login-container {
+                background: rgba(0, 0, 0, 0.8);
+                padding: 30px;
+                border-radius: 15px;
+                max-width: 400px;
+                box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+                backdrop-filter: blur(5px);
+                border: 1px solid rgba(255, 107, 0, 0.3);
+            }
+            .login-header {
+                text-align: center;
+                margin-bottom: 30px;
+            }
+            .login-header h2 {
+                color: #ff6b00;
+                font-size: 1.8rem;
+                margin-bottom: 10px;
+            }
+            .login-header i {
+                font-size: 2.5rem;
+                color: #ff6b00;
+            }
+            .form-group {
+                margin-bottom: 20px;
+            }
+            .form-group label {
+                display: block;
+                margin-bottom: 8px;
+                font-weight: bold;
+            }
+            .form-group input {
+                width: 100%;
+                padding: 12px 10px;
+                border-radius: 8px;
+                border: 2px solid #ff6b00;
+                background: rgba(0, 0, 0, 0.5);
+                color: white;
+                font-size: 1rem;
+            }
+            .login-btn {
+                width: 100%;
+                padding: 12px;
+                background: #ff6b00;
+                color: white;
+                border: none;
+                border-radius: 8px;
+                font-size: 1rem;
+                font-weight: bold;
+                cursor: pointer;
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                gap: 10px;
+            }
+            .login-btn:hover {
+                background: #ff5500;
+            }
+            .alert {
+                padding: 12px;
+                border-radius: 8px;
+                margin-top: 20px;
+                text-align: center;
+                background: #ff4444;
+                color: white;
+            }
+            .back-btn {
+                background: #6c757d;
+                color: white;
+                border: none;
+                padding: 10px 20px;
+                border-radius: 8px;
+                text-decoration: none;
+                display: inline-flex;
+                align-items: center;
+                gap: 8px;
+                margin-top: 15px;
+                cursor: pointer;
+                transition: all 0.3s ease;
+                width: 100%;
+                justify-content: center;
+            }
+            .back-btn:hover {
+                background: #5a6268;
+            }
+        </style>
+        {{ protection_script|safe }}
+    </head>
+    <body>
+        <div class="login-container">
+            <div class="login-header">
+                <i class="fas fa-user-shield"></i>
+                <h2>تسجيل الدخول للإدارة</h2>
+            </div>
+            <form method="POST">
+                <div class="form-group">
+                    <label for="username"><i class="fas fa-user"></i> اسم المستخدم</label>
+                    <input type="text" id="username" name="username" required>
+                </div>
+                <div class="form-group">
+                    <label for="password"><i class="fas fa-lock"></i> كلمة المرور</label>
+                    <input type="password" id="password" name="password" required>
+                </div>
+                <button type="submit" class="login-btn">
+                    <i class="fas fa-sign-in-alt"></i> دخول
+                </button>
+            </form>
+            <button class="back-btn" onclick="goBack()">
+                <i class="fas fa-arrow-right"></i> رجوع للصفحة الرئيسية
+            </button>
+            {% with messages = get_flashed_messages(with_categories=true) %}
+                {% if messages %}
+                    {% for category, message in messages %}
+                        <div class="alert">
+                            <i class="fas fa-exclamation-circle"></i> {{ message }}
+                        </div>
+                    {% endfor %}
+                {% endif %}
+            {% endwith %}
+        </div>
+        <script>
+            function goBack() {
+                window.location.href = '/main';
+            }
+        </script>
+    </body>
+    </html>
+    ''', protection_script=template_protection_script)
 
 @app.route('/admin/dashboard', methods=['GET', 'POST'])
 @admin_required
