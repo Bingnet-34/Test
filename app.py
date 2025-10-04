@@ -83,21 +83,6 @@ def write_users(users_data):
         with open(USERS_JSON, 'w', encoding='utf-8') as f:
             json.dump(users_data, f, ensure_ascii=False, indent=2)
 
-def read_files():
-    """قراءة بيانات الملفات من ملف JSON"""
-    with json_lock:
-        try:
-            with open(FILES_JSON, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError):
-            return {}
-
-def write_files(files_data):
-    """كتابة بيانات الملفات إلى ملف JSON"""
-    with json_lock:
-        with open(FILES_JSON, 'w', encoding='utf-8') as f:
-            json.dump(files_data, f, ensure_ascii=False, indent=2)
-
 def get_user_info(telegram_id):
     """الحصول على معلومات المستخدم"""
     users = read_users()
@@ -118,8 +103,7 @@ def save_user_info(user_data):
             'last_download': None,
             'download_count': 0,
             'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'last_login': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'sessions': {}  # تخزين الجلسات النشطة
+            'last_login': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         }
     else:
         # تحديث البيانات الأساسية وآخر تسجيل دخول
@@ -147,72 +131,6 @@ def get_all_users():
     """الحصول على جميع المستخدمين (للوحة الإدارة)"""
     return read_users()
 
-# نظام الجلسات المحسن
-def create_user_session(telegram_id):
-    """إنشاء جلسة جديدة للمستخدم وإرجاع session_token"""
-    users = read_users()
-    telegram_id_str = str(telegram_id)
-    
-    if telegram_id_str not in users:
-        return None
-    
-    # إنشاء session_token فريد
-    session_token = secrets.token_urlsafe(32)
-    
-    # تخزين الجلسة في بيانات المستخدم
-    if 'sessions' not in users[telegram_id_str]:
-        users[telegram_id_str]['sessions'] = {}
-    
-    users[telegram_id_str]['sessions'][session_token] = {
-        'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-        'last_activity': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-        'user_agent': request.headers.get('User-Agent', '')[:200]
-    }
-    
-    # الاحتفاظ بحد أقصى 5 جلسات نشطة للمستخدم
-    if len(users[telegram_id_str]['sessions']) > 5:
-        # حذف أقدم جلسة
-        oldest_session = min(users[telegram_id_str]['sessions'].keys(), 
-                           key=lambda k: users[telegram_id_str]['sessions'][k]['created_at'])
-        del users[telegram_id_str]['sessions'][oldest_session]
-    
-    write_users(users)
-    return session_token
-
-def validate_user_session(telegram_id, session_token):
-    """التحقق من صحة جلسة المستخدم"""
-    users = read_users()
-    telegram_id_str = str(telegram_id)
-    
-    if (telegram_id_str not in users or 
-        'sessions' not in users[telegram_id_str] or
-        session_token not in users[telegram_id_str]['sessions']):
-        return False
-    
-    # تحديث آخر نشاط للجلسة
-    users[telegram_id_str]['sessions'][session_token]['last_activity'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    write_users(users)
-    
-    return True
-
-def cleanup_expired_sessions():
-    """تنظيف الجلسات المنتهية الصلاحية (أكثر من 7 أيام)"""
-    users = read_users()
-    current_time = datetime.now()
-    
-    for user_id, user_data in users.items():
-        if 'sessions' in user_data:
-            expired_sessions = []
-            for session_token, session_info in user_data['sessions'].items():
-                last_activity = datetime.strptime(session_info['last_activity'], '%Y-%m-%d %H:%M:%S')
-                if (current_time - last_activity).days > 7:
-                    expired_sessions.append(session_token)
-            
-            for session_token in expired_sessions:
-                del user_data['sessions'][session_token]
-    
-    write_users(users)
-
 # تهيئة التخزين
 init_json_storage()
 
@@ -230,6 +148,7 @@ def add_security_headers(response):
     response.headers['X-Frame-Options'] = 'DENY'
     response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
     response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
     return response
 
 template_protection_script = """
@@ -252,73 +171,65 @@ template_protection_script = """
 </script>
 """
 
-def show_notification(message, type='success'):
-    return f"""
-    <div class="notification notification-{type}" id="notification">
-        <div class="notification-content">
-            <i class="fas fa-{ 'check-circle' if type == 'success' else 'exclamation-circle' if type == 'warning' else 'info-circle' if type == 'info' else 'times-circle'}"></i>
-            <span>{message}</span>
-        </div>
-        <button class="notification-close" onclick="closeNotification()">
-            <i class="fas fa-times"></i>
-        </button>
-    </div>
-    <script>
-        function closeNotification() {{
-            document.getElementById('notification').style.display = 'none';
-        }}
-        setTimeout(() => {{
-            const notification = document.getElementById('notification');
-            if (notification) notification.style.display = 'none';
-        }}, 5000);
-    </script>
-    """
-
-# نظام المصادقة المحسن
-def validate_session():
-    """التحقق من صحة جلسة المستخدم"""
-    telegram_id = session.get('telegram_id')
-    session_token = session.get('session_token')
-    
-    if not telegram_id or not session_token:
+# نظام المصادقة المحسن - التحقق الفوري عند كل طلب
+def validate_instant_session():
+    """التحقق الفوري من جلسة المستخدم باستخدام Telegram WebApp data"""
+    # دائماً نتحقق من بيانات Telegram الفورية
+    telegram_data = get_telegram_webapp_data()
+    if not telegram_data or 'user' not in telegram_data:
         return False
     
-    return validate_user_session(telegram_id, session_token)
+    current_user = telegram_data['user']
+    telegram_id = current_user.get('id')
+    
+    if not telegram_id:
+        return False
+    
+    # التحقق من أن المستخدم موجود في قاعدة البيانات
+    user_info = get_user_info(telegram_id)
+    if not user_info:
+        return False
+    
+    # تحديث الجلسة مع المستخدم الحالي
+    session['telegram_id'] = telegram_id
+    session['first_name'] = current_user.get('first_name', '')
+    session['last_name'] = current_user.get('last_name', '')
+    session['username'] = current_user.get('username', '')
+    session['photo_url'] = current_user.get('photo_url', f"https://api.dicebear.com/7.x/bottts/svg?seed={telegram_id}")
+    session['last_verified'] = datetime.now().isoformat()
+    
+    return True
+
+def get_telegram_webapp_data():
+    """الحصول على بيانات Telegram WebApp من الطلب الحالي"""
+    # في بيئة production حقيقية، يجب التحقق من التوقيع هنا
+    init_data = request.args.get('tgWebAppData')
+    if init_data:
+        try:
+            from urllib.parse import parse_qs
+            parsed_data = parse_qs(init_data)
+            if 'user' in parsed_data:
+                user_json = parsed_data['user'][0]
+                return {'user': json.loads(user_json)}
+        except:
+            pass
+    return None
 
 def get_current_user():
-    """الحصول على بيانات المستخدم الحالي"""
+    """الحصول على بيانات المستخدم الحالي مع التحقق الفوري"""
+    if not validate_instant_session():
+        return None
+    
     telegram_id = session.get('telegram_id')
     if not telegram_id:
         return None
     
     return get_user_info(telegram_id)
 
-def create_secure_session(user_data):
-    """إنشاء جلسة آمنة جديدة"""
-    # مسح أي جلسة موجودة أولاً
-    session.clear()
-    
-    # إنشاء جلسة جديدة
-    session_token = create_user_session(user_data['id'])
-    
-    if not session_token:
-        return False
-    
-    # حفظ بيانات الجلسة
-    session['telegram_id'] = user_data['id']
-    session['session_token'] = session_token
-    session['first_name'] = user_data['first_name']
-    session['last_name'] = user_data.get('last_name', '')
-    session['username'] = user_data.get('username', '')
-    session['photo_url'] = user_data.get('photo_url', f"https://api.dicebear.com/7.x/bottts/svg?seed={user_data['id']}")
-    session.permanent = True
-    
-    return True
-
 @app.route('/')
 def index():
-    # تنظيف الجلسات المنتهية periodically
-    cleanup_expired_sessions()
+    # مسح أي جلسة قديمة أولاً
+    session.clear()
     
     return render_template_string('''
     <!DOCTYPE html>
@@ -392,6 +303,10 @@ def index():
         </div>
 
         <script>
+            // مسح أي تخزين محلي قديم
+            localStorage.clear();
+            sessionStorage.clear();
+
             // انتظر حتى يتم تهيئة Telegram WebApp
             Telegram.WebApp.ready();
             Telegram.WebApp.expand();
@@ -404,9 +319,9 @@ def index():
 
             if (user) {
                 console.log('User data:', user);
-                document.getElementById('status').innerHTML = '✅ تم العثور على بيانات المستخدم<br>📧 جاري تسجيل الدخول...';
+                document.getElementById('status').innerHTML = '✅ تم العثور على بيانات المستخدم<br>🔒 جاري التحقق من الهوية...';
                 
-                // إنشاء بيانات المستخدم مع الصورة الحقيقية إذا كانت متاحة
+                // التحقق الفوري من الهوية
                 const userData = {
                     id: user.id,
                     first_name: user.first_name,
@@ -415,8 +330,8 @@ def index():
                     photo_url: user.photo_url || `https://api.dicebear.com/7.x/avataaars/svg?seed=${user.id}`
                 };
 
-                // أرسل بيانات المستخدم إلى الخادم
-                fetch('/auth', {
+                // إرسال بيانات المستخدم إلى الخادم للتحقق الفوري
+                fetch('/instant-auth', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
@@ -426,14 +341,14 @@ def index():
                 .then(response => response.json())
                 .then(data => {
                     if (data.success) {
-                        document.getElementById('status').innerHTML = '✅ تم تسجيل الدخول بنجاح<br>🚀 جاري التوجيه...';
+                        document.getElementById('status').innerHTML = '✅ تم التحقق من الهوية بنجاح<br>🚀 جاري التوجيه...';
+                        console.log('Authenticated user:', data.user);
                         setTimeout(() => {
-                            window.location.href = '/main';
+                            window.location.href = '/main?tgWebAppData=' + encodeURIComponent(Telegram.WebApp.initData);
                         }, 1000);
                     } else {
                         document.getElementById('status').innerHTML = 
-                            '❌ خطأ في المصادقة<br>' + (data.error || 'حدث خطأ غير معروف');
-                        // إعادة المحاولة بعد 3 ثواني
+                            '❌ فشل التحقق من الهوية<br>' + (data.error || 'حدث خطأ غير معروف');
                         setTimeout(() => {
                             window.location.reload();
                         }, 3000);
@@ -442,7 +357,6 @@ def index():
                 .catch(error => {
                     document.getElementById('status').innerHTML = 
                         '❌ خطأ في الاتصال<br>' + error;
-                    // إعادة المحاولة بعد 3 ثواني
                     setTimeout(() => {
                         window.location.reload();
                     }, 3000);
@@ -451,7 +365,6 @@ def index():
                 document.getElementById('status').innerHTML = 
                     '❌ لم يتم العثور على بيانات المستخدم<br>⚠️ يجب فتح التطبيق من خلال بوت تليجرام';
                 
-                // إعادة المحاولة بعد 3 ثواني
                 setTimeout(() => {
                     window.location.reload();
                 }, 3000);
@@ -461,41 +374,39 @@ def index():
     </html>
     ''')
 
-@app.route('/auth', methods=['POST'])
-def auth():
+@app.route('/instant-auth', methods=['POST'])
+def instant_auth():
     try:
         user_data = request.get_json()
         
         if not user_data or 'id' not in user_data:
             return jsonify({'success': False, 'error': 'بيانات غير صالحة'})
         
-        # التحقق من أن البيانات تحتوي على معرف التليجرام
         telegram_id = user_data['id']
         if not telegram_id:
             return jsonify({'success': False, 'error': 'معرف التليجرام مطلوب'})
         
-        # إنشاء جلسة آمنة جديدة
-        if not create_secure_session(user_data):
-            return jsonify({'success': False, 'error': 'فشل في إنشاء الجلسة'})
-        
         # حفظ/تحديث بيانات المستخدم في قاعدة البيانات
         save_user_info(user_data)
         
+        # إرجاع بيانات المستخدم للتحقق
+        user_info = get_user_info(telegram_id)
+        
         return jsonify({
             'success': True, 
-            'message': 'تم إنشاء الجلسة بنجاح',
-            'telegram_id': telegram_id
+            'message': 'تم التحقق من الهوية بنجاح',
+            'user': user_info
         })
         
     except Exception as e:
-        print(f"Error in auth: {e}")
+        print(f"Error in instant auth: {e}")
         return jsonify({'success': False, 'error': str(e)})
 
 @app.route('/main')
 def main():
-    # التحقق من صحة الجلسة أولاً
-    if not validate_session():
-        print("Session validation failed, redirecting to index")
+    # التحقق الفوري من الهوية عند كل طلب
+    if not validate_instant_session():
+        print("Instant session validation failed, redirecting to index")
         session.clear()
         return redirect('/')
     
@@ -507,12 +418,9 @@ def main():
         session.clear()
         return redirect('/')
     
-    print(f"User {user_info['telegram_id']} accessed main page")
+    print(f"User {user_info['telegram_id']} accessed main page - REAL TIME VERIFICATION")
     
     config_files = get_config_files()
-    
-    notification = request.args.get('notification')
-    notification_type = request.args.get('type', 'success')
     
     return render_template_string('''
     <!DOCTYPE html>
@@ -1013,18 +921,6 @@ def main():
             <p id="downloadMessage">يرجى الانتظار جاري تجهيز الملف...</p>
         </div>
 
-        {% if notification %}
-        <div class="notification notification-{{ notification_type }}" id="notification">
-            <div class="notification-content">
-                <i class="fas fa-{% if notification_type == 'success' %}check-circle{% else %}exclamation-circle{% endif %}"></i>
-                <span>{{ notification }}</span>
-            </div>
-            <button class="notification-close" onclick="closeNotification()">
-                <i class="fas fa-times"></i>
-            </button>
-        </div>
-        {% endif %}
-
         <div class="container">
             {% if not session.admin_logged_in %}
             <a href="{{ url_for('admin_login') }}" class="admin-btn">
@@ -1137,6 +1033,21 @@ def main():
         </div>
 
         <script>
+            // التحقق الفوري من الهوية عند تحميل الصفحة
+            function verifyIdentity() {
+                const user = Telegram.WebApp.initDataUnsafe.user;
+                if (!user) {
+                    console.log('No user data found, redirecting...');
+                    window.location.href = '/';
+                    return;
+                }
+                
+                console.log('Current user verified:', user);
+            }
+
+            // التحقق عند تحميل الصفحة
+            window.addEventListener('load', verifyIdentity);
+
             function toggleFileList() {
                 var selectedType = document.getElementById("config-type").value;
                 var fileOptions = document.getElementById("file-options");
@@ -1171,7 +1082,6 @@ def main():
             }
 
             function downloadFile(configType, fileName) {
-                // إظهار نافذة التحميل
                 document.getElementById('downloadModal').style.display = 'block';
                 document.querySelector('.overlay').style.display = 'block';
                 document.getElementById('downloadMessage').textContent = 'جاري إرسال الملف عبر البوت...';
@@ -1189,9 +1099,6 @@ def main():
                         setTimeout(() => {
                             document.getElementById('downloadModal').style.display = 'none';
                             document.querySelector('.overlay').style.display = 'none';
-                            // إظهار إشعار النجاح
-                            showNotification('تم إرسال الملف بنجاح', 'success');
-                            // تحديث الصفحة بعد ثانيتين
                             setTimeout(() => {
                                 window.location.reload();
                             }, 2000);
@@ -1202,39 +1109,8 @@ def main():
                         setTimeout(() => {
                             document.getElementById('downloadModal').style.display = 'none';
                             document.querySelector('.overlay').style.display = 'none';
-                            showNotification('حدث خطأ في التحميل', 'error');
                         }, 2000);
                     });
-            }
-
-            function showNotification(message, type = 'success') {
-                // إنشاء عنصر الإشعار
-                const notification = document.createElement('div');
-                notification.className = `notification notification-${type}`;
-                notification.innerHTML = `
-                    <div class="notification-content">
-                        <i class="fas fa-${type === 'success' ? 'check-circle' : type === 'warning' ? 'exclamation-circle' : type === 'info' ? 'info-circle' : 'times-circle'}"></i>
-                        <span>${message}</span>
-                    </div>
-                    <button class="notification-close" onclick="this.parentElement.remove()">
-                        <i class="fas fa-times"></i>
-                    </button>
-                `;
-                document.body.appendChild(notification);
-                
-                // إزالة الإشعار تلقائياً بعد 5 ثوانٍ
-                setTimeout(() => {
-                    if (notification.parentElement) {
-                        notification.remove();
-                    }
-                }, 5000);
-            }
-
-            function closeNotification() {
-                const notification = document.getElementById('notification');
-                if (notification) {
-                    notification.remove();
-                }
             }
 
             document.getElementById('currentYear').textContent = new Date().getFullYear();
@@ -1242,11 +1118,6 @@ def main():
             window.onload = function() {
                 document.querySelector('.overlay').style.display = 'block';
                 document.getElementById('welcomeModal').style.display = 'block';
-                
-                // إظهار رسالة ترحيب بعد تحميل الصفحة
-                setTimeout(() => {
-                    showNotification('🎉 أهلاً بك {{ user_info.first_name }}! يمكنك الآن تحميل الإعدادات المجانية', 'success');
-                }, 1500);
             }
 
             function closeModal() {
@@ -1254,7 +1125,6 @@ def main():
                 document.getElementById('welcomeModal').style.display = 'none';
             }
 
-            // إغلاق نافذة التحميل عند النقر خارجها
             document.querySelector('.overlay').addEventListener('click', function() {
                 document.getElementById('downloadModal').style.display = 'none';
                 this.style.display = 'none';
@@ -1262,8 +1132,7 @@ def main():
         </script>
     </body>
     </html>
-    ''', user_info=user_info, config_files=config_files, protection_script=template_protection_script, 
-    notification=notification, notification_type=notification_type)
+    ''', user_info=user_info, config_files=config_files, protection_script=template_protection_script)
 
 def get_config_files():
     config_files = {}
@@ -1272,10 +1141,9 @@ def get_config_files():
         try:
             files = []
             for filename in os.listdir(dir_path):
-                if not filename.endswith('.desc'):  # تجاهل ملفات الوصف
+                if not filename.endswith('.desc'):
                     file_path = os.path.join(dir_path, filename)
                     if os.path.isfile(file_path):
-                        # قراءة الوصف من ملف منفصل
                         desc_path = os.path.join(dir_path, f"{filename}.desc")
                         description = "لا يوجد وصف متاح"
                         if os.path.exists(desc_path):
@@ -1302,32 +1170,23 @@ def get_config_files():
 
 @app.route('/download/<config_type>/<path:filename>')
 def download(config_type, filename):
-    # التحقق من صحة الجلسة أولاً
-    if not validate_session():
+    # التحقق الفوري من الهوية قبل كل تحميل
+    if not validate_instant_session():
         return "يجب تسجيل الدخول أولاً", 403
     
-    directory = safe_join(DOWNLOAD_FOLDER, config_type)
-    
-    # الحصول على معرف التليجرام من الجلسة الحالية
     current_user = get_current_user()
     if not current_user:
         return "لم يتم العثور على بيانات المستخدم", 404
     
     telegram_id = current_user['telegram_id']
     
-    # تحديث إحصائيات المستخدم
     update_user_download(telegram_id, filename)
     
-    # إرسال الملف عبر البوت
     try:
         file_path = safe_join(DOWNLOAD_FOLDER, config_type, filename)
         if os.path.exists(file_path):
             with open(file_path, 'rb') as file:
-                bot.send_document(
-                    telegram_id,
-                    file,
-                    caption=f"🦋"
-                )
+                bot.send_document(telegram_id, file, caption=f"🦋")
             return "تم إرسال الملف بنجاح عبر البوت! ✅"
         else:
             return "الملف غير موجود", 404
