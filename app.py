@@ -1213,55 +1213,103 @@ def get_config_files():
 
 @app.route('/download/<config_type>/<path:filename>')
 def download(config_type, filename):
-    # التحقق من جلسة العميل باستخدام Telegram WebApp data
-    if not validate_client_session():
-        return "يجب تسجيل الدخول أولاً", 403
-    
-    current_user = get_current_user()
-    if not current_user:
-        return "لم يتم العثور على بيانات المستخدم", 404
-    
-    telegram_id = current_user['telegram_id']
-    
-    # فك تشفير اسم الملف
     try:
-        decoded_filename = unquote(filename)
-        decoded_config_type = unquote(config_type)
-    except:
-        decoded_filename = filename
-        decoded_config_type = config_type
-    
-    print(f"Download request: User {telegram_id}, File: {decoded_filename}, Type: {decoded_config_type}")
-    
-    # تحديث إحصائيات المستخدم
-    update_user_download(telegram_id, decoded_filename)
-    
-    # إرسال الملف عبر البوت
-    try:
+        # التحقق من جلسة العميل باستخدام Telegram WebApp data
+        if not validate_client_session():
+            return "يجب تسجيل الدخول أولاً", 403
+        
+        current_user = get_current_user()
+        if not current_user:
+            return "لم يتم العثور على بيانات المستخدم", 404
+        
+        telegram_id = current_user['telegram_id']
+        
+        # فك تشفير اسم الملف
+        try:
+            decoded_filename = unquote(filename)
+            decoded_config_type = unquote(config_type)
+        except:
+            decoded_filename = filename
+            decoded_config_type = config_type
+        
+        print(f"Download request: User {telegram_id}, File: {decoded_filename}, Type: {decoded_config_type}")
+        
+        # تحديث إحصائيات المستخدم
+        update_user_download(telegram_id, decoded_filename)
+        
+        # إرسال الملف عبر البوت
         file_path = safe_join(DOWNLOAD_FOLDER, decoded_config_type, decoded_filename)
         print(f"Looking for file at: {file_path}")
         
-        if os.path.exists(file_path):
-            print(f"File found, sending to user {telegram_id}")
-            with open(file_path, 'rb') as file:
-                bot.send_document(
-                    telegram_id, 
-                    file, 
-                    caption=f"🦋 تم إرسال الملف بنجاح!\n\n📁 اسم الملف: {decoded_filename}\n🔧 النوع: {decoded_config_type}\n\nشكراً لاستخدامك خدمتنا 💙"
-                )
-            return "تم إرسال الملف بنجاح عبر البوت! ✅"
-        else:
+        if not os.path.exists(file_path):
             print(f"File not found: {file_path}")
             return "الملف غير موجود", 404
-    except Exception as e:
-        print(f"Error sending file via bot: {e}")
-        error_msg = f"حدث خطأ في إرسال الملف: {str(e)}"
-        # محاولة إرسال رسالة خطأ للمستخدم
+
         try:
-            bot.send_message(telegram_id, f"❌ {error_msg}")
-        except:
-            pass
-        return error_msg, 500
+            # محاولة إرسال الملف عبر البوت
+            with open(file_path, 'rb') as file:
+                bot.send_document(
+                    chat_id=telegram_id,
+                    document=file,
+                    caption=f"🦋 تم إرسال الملف بنجاح!\n\n📁 اسم الملف: {decoded_filename}\n🔧 النوع: {decoded_config_type}\n\nشكراً لاستخدامك خدمتنا 💙",
+                    timeout=30
+                )
+            print(f"✅ File sent successfully to user {telegram_id}")
+            return "تم إرسال الملف بنجاح عبر البوت! ✅"
+            
+        except Exception as e:
+            print(f"❌ Error sending file via bot: {e}")
+            
+            # محاولة بديلة: إرسال رابط تنزيل مباشر
+            try:
+                # إرسال رسالة بديلة مع رابط للتحميل
+                download_url = f"/direct_download/{decoded_config_type}/{decoded_filename}"
+                bot.send_message(
+                    chat_id=telegram_id,
+                    text=f"📥 تعذر إرسال الملف مباشرة\n\n🔗 يمكنك تحميله من الرابط:\n{request.host_url.rstrip('/')}{download_url}\n\n📁 الملف: {decoded_filename}",
+                    timeout=10
+                )
+                return "تم إرسال رابط التحميل عبر البوت! 📎"
+            except Exception as e2:
+                print(f"❌ Error sending fallback message: {e2}")
+                return f"حدث خطأ في الإرسال: {str(e)}", 500
+                
+    except Exception as e:
+        print(f"❌ General error in download: {e}")
+        return f"حدث خطأ: {str(e)}", 500
+
+# إضافة طريق بديل للتحميل المباشر
+@app.route('/direct_download/<config_type>/<path:filename>')
+def direct_download(config_type, filename):
+    try:
+        # التحقق من الجلسة
+        if not validate_client_session():
+            return "يجب تسجيل الدخول أولاً", 403
+        
+        # فك تشفير الأسماء
+        decoded_filename = unquote(filename)
+        decoded_config_type = unquote(config_type)
+        
+        file_path = safe_join(DOWNLOAD_FOLDER, decoded_config_type, decoded_filename)
+        
+        if not os.path.exists(file_path):
+            return "الملف غير موجود", 404
+        
+        # تحديث الإحصائيات
+        current_user = get_current_user()
+        if current_user:
+            update_user_download(current_user['telegram_id'], decoded_filename)
+        
+        # إرسال الملف مباشرة
+        return send_from_directory(
+            os.path.join(DOWNLOAD_FOLDER, decoded_config_type),
+            decoded_filename,
+            as_attachment=True,
+            download_name=decoded_filename
+        )
+        
+    except Exception as e:
+        return f"حدث خطأ: {str(e)}", 500
 
 @app.route('/admin/login', methods=['GET', 'POST'])
 def admin_login():
@@ -2083,6 +2131,16 @@ def stats_command(message):
     except Exception as e:
         print(f"Error in stats command: {e}")
 
+# إضافة دالة لاختبار البوت
+@bot.message_handler(commands=['test'])
+def test_command(message):
+    try:
+        user_id = message.from_user.id
+        bot.send_message(user_id, "✅ البوت يعمل بشكل صحيح!")
+        print(f"✅ Test command executed for user {user_id}")
+    except Exception as e:
+        print(f"❌ Error in test command: {e}")
+
 def run_bot():
     try:
         print("🤖 Starting Telegram Bot...")
@@ -2090,7 +2148,10 @@ def run_bot():
         bot_info = bot.get_me()
         print(f"✅ Bot @{bot_info.username} is running!")
         
-        bot.infinity_polling()
+        # اختبار إرسال رسالة
+        print("🔄 Testing bot functionality...")
+        
+        bot.infinity_polling(timeout=60, long_polling_timeout=30)
     except Exception as e:
         print(f"❌ Bot error: {e}")
         import time
